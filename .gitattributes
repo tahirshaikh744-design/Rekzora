@@ -1,0 +1,14 @@
+# Normalize line endings: Git stores LF, working tree keeps platform default
+* text=auto
+
+# PowerShell and batch files: keep CRLF so Windows parsers are never surprised
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.nsh text eol=crlf
+
+# Binary assets - never diff these
+*.ico binary
+*.png binary
+*.webm binary
+*.rtf binary

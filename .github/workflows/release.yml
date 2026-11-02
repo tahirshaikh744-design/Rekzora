@@ -1,0 +1,45 @@
+name: Release Rekzora
+
+# Prepares & publishes a GitHub Release with BOTH artifacts:
+#   - Rekzora-Setup-<version>.exe     (NSIS installed, EULA page)
+#   - Rekzora-Portable-<version>.exe  (portable single file)
+# Brand: NEURON TS LABS · Author: Mohd Tahir Shaikh
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Generate EULA RTF (installer license page)
+        run: node scripts/make-license-rtf.cjs
+
+      - name: Build & publish (NSIS + portable)
+        run: npx electron-builder --win nsis portable --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # For a SIGNED build ("verified publisher"), add your secret certs:
+        # env:
+        #   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        #   CSC_LINK: ${{ secrets.CSC_LINK }}              # .pfx base64 or URL
+        #   CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+
+      - name: Apply the hand-written release notes (RELEASE-NOTES.md)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit ${{ github.ref_name }} --title "Rekzora ${{ github.ref_name }}" --notes-file RELEASE-NOTES.md

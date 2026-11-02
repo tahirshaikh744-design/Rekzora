@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'" />
+  <link rel="stylesheet" href="region.css" />
+</head>
+<body>
+  <canvas id="cv"></canvas>
+  <div id="hint">Drag to select an area · <b>Enter</b> confirm · <b>Esc</b> cancel</div>
+  <div id="size" hidden>0 × 0</div>
+  <div id="actions" hidden>
+    <button id="a-cancel">Cancel</button>
+    <button id="a-redo">Redo</button>
+    <button id="a-confirm">Record this area</button>
+  </div>
+  <script src="region.js"></script>
+</body>
+</html>

@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' file: blob:; connect-src 'self' blob: data:" />
+  <title>Rekzora</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- ============ Titlebar (Windows-style controls) ============ -->
+  <header id="titlebar">
+    <div class="titlebar-left">
+      <span class="logo-dot"></span> Rekzora
+    </div>
+    <div class="win-controls">
+      <button id="wc-min" class="wc" title="Minimize">
+        <svg viewBox="0 0 12 12"><line x1="1" y1="6" x2="11" y2="6"/></svg>
+      </button>
+      <button id="wc-max" class="wc" title="Maximize">
+        <svg viewBox="0 0 12 12"><rect x="1.5" y="1.5" width="9" height="9" rx="1.5"/></svg>
+      </button>
+      <button id="wc-close" class="wc wc-close" title="Close">
+        <svg viewBox="0 0 12 12"><line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="app">
+    <!-- ============ Sidebar ============ -->
+    <nav id="sidebar">
+      <div class="nav-group">
+        <button class="nav-item active" data-nav="record">
+          <span class="nav-ico">⏺</span><span>Record</span>
+        </button>
+        <button class="nav-item" data-nav="library">
+          <span class="nav-ico">▤</span><span>Library</span>
+          <span id="library-count" class="nav-badge" hidden></span>
+        </button>
+        <button class="nav-item" data-nav="settings">
+          <span class="nav-ico">⚙</span><span>Settings</span>
+        </button>
+      </div>
+      <div class="sidebar-footer">
+        <div class="version" id="app-version">v1.0.0</div>
+      </div>
+    </nav>
+
+    <!-- ============ Main content ============ -->
+    <main id="main">
+
+      <!-- ======== Page: Record ======== -->
+      <section class="page active" id="page-record">
+        <div class="record-stage">
+          <!-- Idle → big record button -->
+          <div id="home-main" class="home-main">
+            <div class="mode-row">
+              <div class="segmented" id="mode-seg">
+                <button data-mode="fullscreen" class="active">Fullscreen</button>
+                <button data-mode="window">Window</button>
+                <button data-mode="region">Region</button>
+              </div>
+            </div>
+
+            <button id="record-btn" class="record-btn" title="Start recording (F9)">
+              <span class="rb-outer"></span>
+              <span class="rb-inner"><span class="rb-dot"></span></span>
+            </button>
+
+            <div class="record-hint" id="record-hint">Click to start · F9 anywhere</div>
+
+            <div class="device-grid">
+              <div class="device-card" id="dev-mic" data-on="1">
+                <div class="device-ico">🎙</div>
+                <div class="device-info">
+                  <div class="device-name">Microphone</div>
+                  <div class="device-state">On</div>
+                </div>
+                <div class="switch"><span></span></div>
+              </div>
+              <div class="device-card" id="dev-sys" data-on="1">
+                <div class="device-ico">🔊</div>
+                <div class="device-info">
+                  <div class="device-name">System audio</div>
+                  <div class="device-state">On</div>
+                </div>
+                <div class="switch"><span></span></div>
+              </div>
+              <div class="device-card" id="dev-cam" data-on="0">
+                <div class="device-ico">📷</div>
+                <div class="device-info">
+                  <div class="device-name">Camera</div>
+                  <div class="device-state">Off</div>
+                </div>
+                <div class="switch"><span></span></div>
+              </div>
+            </div>
+
+            <div class="quality-row">
+              <div class="field-block">
+                <span class="field-label">Frame rate</span>
+                <div class="segmented small" id="fps-home">
+                  <button data-fps="24">24</button>
+                  <button data-fps="30">30</button>
+                  <button data-fps="60">60</button>
+                </div>
+              </div>
+              <div class="field-block">
+                <span class="field-label">Quality</span>
+                <div class="segmented small" id="quality-home">
+                  <button data-quality="low">Low</button>
+                  <button data-quality="medium">Med</button>
+                  <button data-quality="high">High</button>
+                  <button data-quality="ultra">Ultra</button>
+                </div>
+              </div>
+            </div>
+            <div class="field-block res-block">
+              <span class="field-label">Resolution</span>
+              <div class="segmented small chips" id="res-home">
+                <button data-resolution="auto">Auto</button>
+                <button data-resolution="240p">240p</button>
+                <button data-resolution="360p">360p</button>
+                <button data-resolution="480p">480p</button>
+                <button data-resolution="720p">720p</button>
+                <button data-resolution="1080p">1080p</button>
+                <button data-resolution="1440p">1440p</button>
+                <button data-resolution="2160p">2160p</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Recording → status panel -->
+          <div id="rec-main" class="rec-main" hidden>
+            <div class="pulse-ring" id="pulse-ring"></div>
+            <div class="rec-timer" id="rec-timer">00:00</div>
+            <div class="rec-source" id="rec-source">Screen</div>
+            <div class="rec-controls">
+              <button id="page-pause" class="round-btn" title="Pause (F10)">⏸</button>
+              <button id="page-stop" class="round-btn danger" title="Stop (F9)">⏹</button>
+            </div>
+            <div class="rec-note">The floating bar stays with you. Rekzora can be minimized.</div>
+          </div>
+
+          <!-- Countdown overlay -->
+          <div id="countdown" class="countdown" hidden>
+            <div class="cd-number" id="cd-number">3</div>
+            <div class="cd-label">Recording starts soon</div>
+          </div>
+        </div>
+
+        <div class="tips-card">
+          <div class="tips-title">Keyboard shortcuts</div>
+          <div class="tips-grid">
+            <div><kbd id="kbd-toggle">F9</kbd><span>Start / stop recording</span></div>
+            <div><kbd id="kbd-pause">F10</kbd><span>Pause / resume</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ======== Page: Library ======== -->
+      <section class="page" id="page-library">
+        <div class="page-head">
+          <h2>Library</h2>
+          <div class="page-head-actions">
+            <button class="ghost-btn" id="lib-open-folder">Open folder</button>
+            <button class="ghost-btn" id="lib-change-folder">Move…</button>
+          </div>
+        </div>
+        <div class="lib-folder" id="lib-folder">…</div>
+        <input type="search" id="lib-search" class="search" placeholder="Search recordings…" />
+        <div id="lib-grid" class="lib-grid"></div>
+        <div id="lib-empty" class="empty" hidden>
+          <div class="empty-ico">🎞</div>
+          <div class="empty-title">No recordings yet</div>
+          <div class="empty-sub">Your recordings will appear here after you capture something.</div>
+        </div>
+      </section>
+
+      <!-- ======== Page: Player ======== -->
+      <section class="page" id="page-player">
+        <div class="player-head">
+          <button class="ghost-btn" id="player-back">‹ Library</button>
+          <div class="player-title" id="player-title" title="Click to rename">…</div>
+          <div class="page-head-actions">
+            <button class="ghost-btn" id="player-share">Share</button>
+            <button class="ghost-btn" id="player-reveal">Show in folder</button>
+            <button class="ghost-btn danger" id="player-delete">Delete</button>
+          </div>
+        </div>
+        <div class="player-meta" id="player-meta">—</div>
+        <div class="player-stage"><video id="player-video" controls></video></div>
+      </section>
+
+      <!-- ======== Page: Settings ======== -->
+      <section class="page" id="page-settings">
+        <div class="page-head"><h2>Settings</h2></div>
+
+        <div class="card">
+          <div class="card-title">Appearance</div>
+          <div class="row">
+            <div class="row-label">Theme</div>
+            <div class="segmented small" id="theme-seg">
+              <button data-theme="dark" class="active">Dark</button>
+              <button data-theme="light">Light</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Recording</div>
+          <div class="row">
+            <div class="row-label">Countdown</div>
+            <div class="segmented small" id="countdown-seg">
+              <button data-countdown="0">None</button>
+              <button data-countdown="3" class="active">3s</button>
+              <button data-countdown="5">5s</button>
+            </div>
+          </div>
+          <div class="row">
+            <div class="row-label">Frame rate</div>
+            <div class="segmented small" id="fps-seg">
+              <button data-fps="24">24</button>
+              <button data-fps="30" class="active">30</button>
+              <button data-fps="60">60</button>
+            </div>
+          </div>
+          <div class="row">
+            <div class="row-label">Quality</div>
+            <div class="segmented small" id="quality-seg">
+              <button data-quality="low">Low</button>
+              <button data-quality="medium">Medium</button>
+              <button data-quality="high" class="active">High</button>
+              <button data-quality="ultra">Ultra</button>
+            </div>
+          </div>
+          <div class="row">
+            <div class="row-label">Resolution</div>
+            <div class="segmented small chips" id="resolution-seg">
+              <button data-resolution="auto">Auto</button>
+              <button data-resolution="240p">240p</button>
+              <button data-resolution="360p">360p</button>
+              <button data-resolution="480p">480p</button>
+              <button data-resolution="720p">720p</button>
+              <button data-resolution="1080p">1080p</button>
+              <button data-resolution="1440p">1440p</button>
+              <button data-resolution="2160p">2160p</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Storage</div>
+          <div class="row">
+            <div class="row-label">Recordings folder</div>
+            <div class="row-value" id="set-folder">…</div>
+            <button class="ghost-btn" id="set-folder-change">Change</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Shortcuts</div>
+          <!-- Custom themed dropdowns: native <select> popups blend author
+               colors with OS scheme colors on Windows (invisible text). -->
+          <div class="row">
+            <div class="row-label">Start / stop recording</div>
+            <div class="drop" id="set-hotkey-toggle"></div>
+          </div>
+          <div class="row">
+            <div class="row-label">Pause / resume</div>
+            <div class="drop" id="set-hotkey-pause"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Behavior</div>
+          <div class="row">
+            <div class="row-label">Keep in tray on close</div>
+            <div class="switch" id="set-close-tray" data-on="1" role="switch" tabindex="0"><span></span></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">About</div>
+          <div class="row"><div class="row-label">Version</div><div class="row-value" id="set-version">1.0.0</div></div>
+          <div class="row"><div class="row-label">License</div><div class="row-value">MIT — open source</div></div>
+          <div class="row"><div class="row-label">Format</div><div class="row-value">WebM (VP9 / Opus)</div></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ============ Source picker modal ============ -->
+  <div id="picker" class="modal" hidden>
+    <div class="modal-card picker-card">
+      <div class="modal-head">
+        <div>
+          <div class="modal-title" id="picker-title">Choose what to record</div>
+          <div class="modal-sub">Pick a screen or an app window</div>
+        </div>
+        <button class="round-btn ghost" id="picker-close" title="Cancel">✕</button>
+      </div>
+      <div class="picker-scroll">
+        <div class="picker-group" id="picker-screens">
+          <div class="picker-group-title">Screens</div>
+          <div class="picker-grid" id="picker-grid-screens"></div>
+        </div>
+        <div class="picker-group" id="picker-windows">
+          <div class="picker-group-title">Applications &amp; Windows</div>
+          <div class="picker-grid" id="picker-grid-windows"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ Generic confirm / prompt modal ============ -->
+  <div id="dialog" class="modal" hidden>
+    <div class="modal-card dialog-card">
+      <div class="modal-title" id="dialog-title">Are you sure?</div>
+      <div class="modal-sub" id="dialog-sub" hidden></div>
+      <input id="dialog-input" class="input" hidden />
+      <div class="dialog-actions">
+        <button class="ghost-btn" id="dialog-cancel">Cancel</button>
+        <button class="primary-btn" id="dialog-ok">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ Share sheet ============ -->
+  <div id="share" class="modal" hidden>
+    <div class="modal-card share-card">
+      <div class="modal-head">
+        <div>
+          <div class="modal-title">Share recording</div>
+          <div class="modal-sub" id="share-name">…</div>
+        </div>
+        <button class="round-btn ghost" id="share-close" title="Close">✕</button>
+      </div>
+      <div class="share-apps" id="share-apps"></div>
+      <div class="share-group-title">Other actions</div>
+      <div class="share-generic" id="share-generic"></div>
+    </div>
+  </div>
+
+  <!-- ============ Three-dot context menu ============ -->
+  <div id="vmenu" class="vmenu" hidden></div>
+
+  <!-- ============ First-run Privacy Policy / EULA ============ -->
+  <div id="eula" class="modal" hidden>
+    <div class="modal-card eula-card">
+      <div class="modal-head">
+        <div>
+          <div class="modal-title">Privacy Policy &amp; Terms of Use</div>
+          <div class="modal-sub" id="eula-sub">Rekzora · NEURON TS LABS — Mohd Tahir Shaikh</div>
+        </div>
+        <div class="eula-brand">
+          <div class="eula-dot"></div>
+          <span>NEURON TS LABS</span>
+        </div>
+      </div>
+      <div class="eula-text" id="eula-text">
+        <p><b>1. Privacy — the short version.</b> Rekzora is offline-first. We collect nothing, track nobody, and phone no home. There is no account, no login, no cloud, no analytics and no advertising.</p>
+        <p><b>2. What stays on your PC.</b> Your recordings are saved only to the folder you choose (by default <span class="mono">Videos\Rekzora Recordings</span>), and your preferences live in your own AppData profile. Nothing is uploaded, streamed or copied anywhere — ever.</p>
+        <p><b>3. What we do NOT collect.</b> No personal information. No audio, video or screen content — recordings never leave your device memory except when you share them yourself. No crash dumps sent automatically. No telemetry, statistics or usage tracking. No cookies, fingerprinting or ad identifiers.</p>
+        <p><b>4. Network access.</b> Rekzora makes no network connections of its own. Any transmission (sharing a video via Quick Share, SHAREit, Telegram…) is performed by <b>your</b> apps, under <b>their</b> privacy policies — not ours.</p>
+        <p><b>5. Microphone, camera &amp; screen.</b> Used only while a recording you started is actively running. Windows shows recording indicators at that time. Recordings go straight to your disk; no hidden copies are kept.</p>
+        <p><b>6. Your rights &amp; deletion.</b> Because all data is already local, you are always in control: uninstalling removes the program, deleting the recordings folder erases your videos, and in-app Delete permanently removes selected files (no recycle bin).</p>
+        <p><b>7. License.</b> Rekzora is open source under the MIT License. This agreement governs the compiled builds distributed by NEURON TS LABS. You may use, copy, modify and redistribute freely, provided you don't present the brand as your own, don't break law with it, and don't remove attribution.</p>
+        <p><b>8. No warranty.</b> "Rekzora" is provided "as is" without any warranty. You are responsible for what you record and with whom you share it. NEURON TS LABS and the author assume no liability for loss of data, recordings or profits.</p>
+        <p><b>9. Contact.</b> NEURON TS LABS — Mohd Tahir Shaikh · <span class="mono">tahirshaikh744@gmail.com</span> · <span class="mono">github.com/tahirshaikh744-design/rekzora</span>. We answer privacy/security mail within 15 business days.</p>
+      </div>
+      <div class="eula-actions">
+        <button class="ghost-btn" id="eula-disagree">I Disagree</button>
+        <button class="primary-btn" id="eula-agree">I Agree</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ Toasts ============ -->
+  <div id="toasts"></div>
+
+  <script src="recorder.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'" />
+  <link rel="stylesheet" href="floating.css" />
+</head>
+<body>
+  <div id="bar">
+    <div class="dot-wrap"><span class="dot" id="dot"></span></div>
+    <div class="time" id="time">00:00</div>
+    <button id="btn-pause" class="fb" title="Pause / resume (F10)">⏸</button>
+    <button id="btn-stop" class="fb stop" title="Stop (F9)">⏹</button>
+  </div>
+  <script src="floating.js"></script>
+</body>
+</html>
