@@ -1,19 +1,52 @@
 'use strict';
-/* Rekzora preload: a small, typed, security-reviewed bridge. */
+/* ============================================================
+   Rekzora preload: a small, typed, security-reviewed bridge.
+
+   v1.1 least-privilege model: the window's role travels via
+   webPreferences.additionalArguments (--rekzora-role=MAIN|FLOATING|REGION)
+   and only the API slice that role needs is ever exposed.
+
+   MAIN     — full application surface (recording, library, share, settings)
+   FLOATING — recording-toolbar actions + state updates + logging
+   REGION   — region-picker results/cancel + logging
+   (anything else → an empty bridge; fail closed)
+
+   Keep the channel lists in sync with lib/ipc-guard.js ROLE_CHANNELS:
+   tests/preload-role-parity.test.js verifies the two files agree.
+   ============================================================ */
 
 const { contextBridge, ipcRenderer } = require('electron');
 
-const SENDED_EVENTS = new Set([
+function roleFromArgv() {
+  const arg = (process.argv || []).find((a) => typeof a === 'string' && a.startsWith('--rekzora-role='));
+  return arg ? arg.slice('--rekzora-role='.length) : 'MAIN';
+}
+const ROLE = roleFromArgv();
+
+/* ---------- channel policy (mirrors ROLE_CHANNELS in lib/ipc-guard.js) ---------- */
+const CHANNELS_MAIN = [
+  'settings:get', 'settings:set', 'sources:get', 'capture:select-source', 'screen:primary-fast',
+  'rec:begin', 'rec:chunk', 'rec:finish', 'rec:discard',
+  'recordings:list', 'recording:delete', 'recording:rename', 'recording:open', 'recording:path',
+  'recordings:folder-pick', 'recordings:folder-open',
+  'region:begin', 'region:get-bounds',
+  'float:show', 'float:hide',
+  'app:version', 'app:clipboard-write',
+  'share:apps', 'share:launch', 'share:openwith'
+];
+const CHANNELS_FLOATING = [];
+const CHANNELS_REGION = [];
+
+const SEND_CHANNELS = new Set([
   'rec:state', 'float:action', 'region:done', 'region:cancel',
   'app:window', 'app:log', 'app:open-external', 'app:drag-start', 'app:quit'
 ]);
-
 const LISTEN_EVENTS = new Set([
   'recorder:action', 'float:state', 'region:result', 'recordings:changed'
 ]);
 
 function send(channel, ...args) {
-  if (SENDED_EVENTS.has(channel)) ipcRenderer.send(channel, ...args);
+  if (SEND_CHANNELS.has(channel)) ipcRenderer.send(channel, ...args);
 }
 function on(channel, cb) {
   if (!LISTEN_EVENTS.has(channel) || typeof cb !== 'function') return () => {};
@@ -22,19 +55,19 @@ function on(channel, cb) {
   return () => ipcRenderer.removeListener(channel, wrapped);
 }
 const invoke = (channel, ...args) => {
-  const allowed = new Set([
-    'settings:get', 'settings:set', 'sources:get', 'capture:select-source', 'screen:primary-fast',
-    'rec:begin', 'rec:chunk', 'rec:finish', 'rec:discard',
-    'recordings:list', 'recording:delete', 'recording:rename', 'recording:open',
-    'recordings:folder-pick', 'recordings:folder-open',
-    'region:begin', 'region:get-bounds',
-    'float:show', 'float:hide', 'app:version',
-    'app:clipboard-write', 'share:apps', 'share:launch', 'share:openwith'
-  ]);
-  return allowed.has(channel) ? ipcRenderer.invoke(channel, ...args) : Promise.reject(new Error('channel not allowed'));
+  const pool = ROLE === 'MAIN' ? CHANNELS_MAIN : ROLE === 'FLOATING' ? CHANNELS_FLOATING : CHANNELS_REGION;
+  return pool.includes(channel)
+    ? ipcRenderer.invoke(channel, ...args)
+    : Promise.reject(new Error(`channel not allowed for role ${ROLE}`));
 };
 
-contextBridge.exposeInMainWorld('rekzora', {
+/* ---------- bridges ---------- */
+
+/* MAIN application surface.
+   Recording sessions: the renderer only ever holds an opaque recordingId —
+   no temp path is exposed to renderer JavaScript in v1.1 (P0 fix).
+   Library: opaque record ids in and out; no filesystem paths cross IPC. */
+const bridgeFull = {
   settings: {
     get: () => invoke('settings:get'),
     set: (patch) => invoke('settings:set', patch)
@@ -48,16 +81,17 @@ contextBridge.exposeInMainWorld('rekzora', {
   },
   rec: {
     begin: () => invoke('rec:begin'),
-    chunk: (tempPath, u8) => invoke('rec:chunk', tempPath, u8),
+    chunk: (recordingId, u8) => invoke('rec:chunk', recordingId, u8),
     finish: (payload) => invoke('rec:finish', payload),
-    discard: (tempPath) => invoke('rec:discard', tempPath),
+    discard: (recordingId) => invoke('rec:discard', recordingId),
     state: (s) => send('rec:state', s)
   },
   recordings: {
     list: () => invoke('recordings:list'),
-    remove: (p) => invoke('recording:delete', p),
-    rename: (path, newName) => invoke('recording:rename', { path, newName }),
-    reveal: (p) => invoke('recording:open', p),
+    remove: (id) => invoke('recording:delete', id),
+    rename: (id, newName) => invoke('recording:rename', [id, newName]),
+    reveal: (id) => invoke('recording:open', id),
+    getFilePath: (id) => invoke('recording:path', id),
     pickFolder: () => invoke('recordings:folder-pick'),
     openFolder: () => invoke('recordings:folder-open'),
     onChanged: (cb) => on('recordings:changed', cb)
@@ -91,13 +125,42 @@ contextBridge.exposeInMainWorld('rekzora', {
     write: (t) => invoke('app:clipboard-write', t)
   },
   drag: {
-    start: (p) => send('app:drag-start', p)
+    start: (recordingId) => send('app:drag-start', recordingId)
   },
   share: {
     apps: (payload) => invoke('share:apps', payload),
     launch: (payload) => invoke('share:launch', payload),
-    openWith: (p) => invoke('share:openwith', p)
+    openWith: (recordingId) => invoke('share:openwith', recordingId)
   },
   log: (...a) => send('app:log', a.map(String)),
   openExternal: (url) => send('app:open-external', url)
-});
+};
+
+/* floating toolbar: button actions + state updates + logging only */
+const bridgeFloating = {
+  float: {
+    action: (action) => send('float:action', String(action || '').slice(0, 32)),
+    onState: (cb) => on('float:state', cb)
+  },
+  log: (...a) => send('app:log', a.map(String))
+};
+
+/* region picker: submit/cancel result + logging only */
+const bridgeRegion = {
+  region: {
+    sendDone: (rect) => send('region:done', rect),
+    sendCancel: () => send('region:cancel')
+  },
+  log: (...a) => send('app:log', a.map(String))
+};
+
+/* unexpected role → expose nothing (fail closed) */
+const bridgeEmpty = {};
+
+const bridge =
+  ROLE === 'MAIN' ? bridgeFull :
+  ROLE === 'FLOATING' ? bridgeFloating :
+  ROLE === 'REGION' ? bridgeRegion :
+  bridgeEmpty;
+
+contextBridge.exposeInMainWorld('rekzora', bridge);

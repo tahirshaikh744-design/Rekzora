@@ -27,6 +27,8 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
+    "test": "node --test",
+    "smoke": "electron . --smoke",
     "dist": "electron-builder --win nsis portable",
     "dist:installer": "electron-builder --win nsis",
     "dist:portable": "electron-builder --win portable"
@@ -45,6 +47,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "lib/**/*",
       "src/**/*",
       "assets/**/*"
     ],

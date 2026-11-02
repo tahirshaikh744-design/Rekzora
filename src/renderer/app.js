@@ -29,10 +29,10 @@
       });
     } catch { return ''; }
   }
-  function fileUrl(p) {
-    const norm = p.replace(/\\/g, '/');
-    return 'file:///' + norm.split('/').map((seg) => encodeURIComponent(seg)).join('/')
-      .replace(/%3A/g, ':');
+  function videoUrl(id) {
+    /* recordings stream from the main process over an id-addressed custom
+       protocol; the renderer never holds filesystem paths */
+    return 'rekzora-video://' + encodeURIComponent(String(id)) + '/video';
   }
   function clampRect(r, w, h) {
     const x = Math.max(0, Math.min(w - 4, Math.round(r.x)));
@@ -532,13 +532,15 @@
     const dur = fmtDur(detail.durationMs);
     const size = fmtBytes(detail.size);
     const title = (detail.fileName || 'Screen Recording').replace(/\.webm$/i, '');
-    toast(`Saved — ${title}`, {
-      sub: `${detail.path} · ${dur} · ${size}`,
+    const partial = detail.status === 'partial';
+    toast(partial ? `Saved with issues — ${title}` : `Saved — ${title}`, {
+      sub: `${detail.fileName} · ${dur} · ${size}${partial ? ' · some chunks were lost' : ''}`,
+      level: partial ? 'warn' : undefined,
       duration: 9000,
       actions: [
-        { label: 'Show', onClick: () => rekzora.recordings.reveal(detail.path) },
-        { label: 'Share', onClick: () => openShareById(detail) },
-        { label: 'Play', onClick: () => openSaved(detail) }
+        { label: 'Show', onClick: () => detail.id && rekzora.recordings.reveal(detail.id) },
+        { label: 'Share', onClick: () => detail.id && openShare({ id: detail.id }) },
+        { label: 'Play', onClick: () => detail.id && openSaved(detail) }
       ]
     });
     switchPage('library');
@@ -547,9 +549,11 @@
   async function openSaved(detail) {
     try {
       const items = await rekzora.recordings.list();
-      const match = items.find(i => i.path === detail.path) ||
-        { path: detail.path, title: (detail.fileName || '').replace(/\.webm$/i, ''), size: detail.size || 0, durationMs: detail.durationMs || 0, created: Date.now(), type: 'screen' };
-      openPlayer(match);
+      const match = (detail.id && items.find(i => i.id === detail.id)) ||
+        (detail.id
+          ? { id: detail.id, title: (detail.fileName || '').replace(/\.webm$/i, ''), size: detail.size || 0, durationMs: detail.durationMs || 0, created: Date.now(), type: 'screen' }
+          : items[0]);
+      if (match) openPlayer(match);
     } catch { /* ignore */ }
   }
 
@@ -713,7 +717,7 @@
       card.draggable = true;
       card.ondragstart = (e) => {
         e.preventDefault(); // hand over to native OS drag (real file payload)
-        rekzora.drag.start(item.path);
+        rekzora.drag.start(item.id);
       };
       const kebab = card.querySelector('.kebab-btn');
       kebab.onclick = (e) => {
@@ -751,10 +755,15 @@
     menu.appendChild(mk('Play', '▶', () => openPlayer(item)));
     menu.appendChild(mk('Share…', '📤', () => openShare(item)));
     menu.appendChild(mk('Rename', '✏️', () => renameRecording(item)));
-    menu.appendChild(mk('Show in folder', '📂', () => rekzora.recordings.reveal(item.path)));
-    menu.appendChild(mk('Copy file path', '📋', () => {
-      rekzora.clipboard.write(item.path);
-      toast('File path copied to clipboard.');
+    menu.appendChild(mk('Show in folder', '📂', () => rekzora.recordings.reveal(item.id)));
+    menu.appendChild(mk('Copy file path', '📋', async () => {
+      const p = await rekzora.recordings.getFilePath(item.id);
+      if (p) {
+        rekzora.clipboard.write(p);
+        toast('File path copied to clipboard.');
+      } else {
+        toast('Could not resolve the file (recording missing?).', { level: 'warn' });
+      }
     }));
     menu.appendChild(mk('Properties', 'ℹ️', () => showProperties(item)));
     menu.appendChild(document.createElement('hr'));
@@ -805,8 +814,8 @@
       });
       if (name) {
         try {
-          await rekzora.recordings.rename(item.path, name);
-          if (currentRecording && currentRecording.path === item.path) {
+          await rekzora.recordings.rename(item.id, name);
+          if (currentRecording && currentRecording.id === item.id) {
             currentRecording.title = name;
             $('#player-title').textContent = name;
           }
@@ -827,8 +836,8 @@
         okText: 'Delete', cancelText: 'Cancel'
       });
       if (ok) {
-        await rekzora.recordings.remove(item.path);
-        if (currentRecording && currentRecording.path === item.path) {
+        await rekzora.recordings.remove(item.id);
+        if (currentRecording && currentRecording.id === item.id) {
           $('#player-video').pause();
           $('#player-video').removeAttribute('src');
           $('#player-video').load();
@@ -876,7 +885,7 @@
       dt.draggable = true;
       dt.ondragstart = (e) => {
         e.preventDefault(); // Qt/Electron takes over as a native file drag
-        rekzora.drag.start(item.path);
+        rekzora.drag.start(item.id);
       };
       const ico = document.createElement('div');
       ico.className = 'dt-ico';
@@ -909,14 +918,15 @@
     grid.innerHTML = '';
     if (apps.length) {
       for (const app of apps) {
+        if (app.available === false) continue;   // registry says the app vanished
         const b = document.createElement('button');
         b.className = 'share-app';
         b.innerHTML = `<span class="share-ico"></span><span></span>`;
         b.querySelector('.share-ico').textContent = app.ico || SHARE_GUIDE_ICO[app.id] || '📤';
         b.querySelector('span:last-child').textContent = app.name;
         b.onclick = () => {
-          const args = (app.args || []).concat([item.path]);
-          rekzora.share.launch({ exe: app.exe, args });
+          /* launch by appId — the main process owns executables and args */
+          rekzora.share.launch({ appId: app.id, recordingId: item.id });
           toast(`Opening ${app.name}…`, {
             sub: `Quick Share-style apps can't receive files from the command line — drag the tile into the ${app.name} window to attach "${item.title}".`,
             duration: 7000
@@ -950,18 +960,21 @@
     };
 
     mkGen('Quick Share / Nearby — reveal file for manual sharing', '🪟', () => {
-      rekzora.recordings.reveal(item.path);
+      rekzora.recordings.reveal(item.id);
       toast('File revealed in Explorer', {
         sub: 'Windows keeps no public "Open Nearby Sharing" API — right-click the file → Share (or the Quick Share icon) to send it. Use the buttons above for one-click app sharing.',
         duration: 9000
       });
     });
     mkGen('Choose another app…', '🧩', () => {
-      rekzora.share.openWith(item.path);
+      rekzora.share.openWith(item.id);
     });
-    mkGen('Copy file path', '📋', () => {
-      rekzora.clipboard.write(item.path);
-      toast('File path copied — paste it into any sharing app.');
+    mkGen('Copy file path', '📋', async () => {
+      const p = await rekzora.recordings.getFilePath(item.id);
+      if (p) {
+        rekzora.clipboard.write(p);
+        toast('File path copied — paste it into any sharing app.');
+      }
     });
     mkGen('Open recordings folder', '📂', () => rekzora.recordings.openFolder());
   }
@@ -969,9 +982,11 @@
   async function openShareById(detail) {
     try {
       const items = await rekzora.recordings.list();
-      const match = items.find(i => i.path === detail.path) ||
-        { path: detail.path, title: (detail.fileName || '').replace(/\.webm$/i, ''), fileName: detail.fileName, size: detail.size || 0, durationMs: detail.durationMs || 0, created: Date.now(), type: 'screen' };
-      openShare(match);
+      const match = (detail.id && items.find(i => i.id === detail.id)) ||
+        (detail.id
+          ? { id: detail.id, title: (detail.fileName || '').replace(/\.webm$/i, ''), fileName: detail.fileName, size: detail.size || 0, durationMs: detail.durationMs || 0, created: Date.now(), type: 'screen' }
+          : null);
+      if (match) openShare(match);
     } catch { /* ignore */ }
   }
 
@@ -1000,14 +1015,14 @@
       `${fmtBytes(item.size)} · ${item.durationMs ? fmtDur(item.durationMs) : '—'} · ${fmtDate(item.created)} · ` +
       `${item.type === 'window' ? 'Window recording' : item.type === 'region' ? 'Region recording' : 'Fullscreen recording'}` +
       (item.fps ? ` · ${item.fps} fps` : '') + (item.quality ? ` · ${item.quality}` : '');
-    $('#player-video').src = fileUrl(item.path);
+    $('#player-video').src = videoUrl(item.id);
     $('#player-video').play().catch(() => {});
     // Native OS drag-out from the player stage
     const stage = $('.player-stage');
     stage.draggable = true;
     stage.ondragstart = (e) => {
       e.preventDefault();
-      rekzora.drag.start(item.path);
+      rekzora.drag.start(item.id);
     };
   }
   $('#player-back').onclick = () => {
@@ -1015,7 +1030,7 @@
     v.pause(); v.removeAttribute('src'); v.load();
     switchPage('library');
   };
-  $('#player-reveal').onclick = () => currentRecording && rekzora.recordings.reveal(currentRecording.path);
+  $('#player-reveal').onclick = () => currentRecording && rekzora.recordings.reveal(currentRecording.id);
   $('#player-share').onclick = () => currentRecording && openShare(currentRecording);
   $('#share-close').onclick = () => { $('#share').hidden = true; };
   $('#player-delete').onclick = async () => {
@@ -1026,7 +1041,7 @@
       okText: 'Delete', cancelText: 'Cancel'
     });
     if (ok) {
-      await rekzora.recordings.remove(currentRecording.path);
+      await rekzora.recordings.remove(currentRecording.id);
       const v = $('#player-video');
       v.pause(); v.removeAttribute('src'); v.load();
       currentRecording = null;
@@ -1043,7 +1058,8 @@
     });
     if (name) {
       try {
-        await rekzora.recordings.rename(currentRecording.path, name);
+        const newId = await rekzora.recordings.rename(currentRecording.id, name);
+        if (newId) currentRecording.id = newId; // ids survive renames in v1.1
         currentRecording.title = name;
         $('#player-title').textContent = name;
         toast('Renamed.');

@@ -194,13 +194,14 @@
     const session = {
       cfg,
       writeErrors: 0,
+      queueDepth: 0,
       writeChain: Promise.resolve(),
       chunkQueue: Promise.resolve(),
       thumb: null,
       audioCtx: null,
       drawTimer: null,
       uiTimer: null,
-      tempPath: null,
+      recordingId: null,
       recorder: null
     };
     rec.session = session;
@@ -442,12 +443,14 @@
       });
 
       mr.addEventListener('dataavailable', (e) => {
-        if (!e.data || !e.data.size || !s.tempPath) return;
+        if (!e.data || !e.data.size || !s.recordingId) return;
         const blob = e.data;
+        s.queueDepth = (s.queueDepth || 0) + 1;      // bounded-chunk tracking (§11)
         s.writeChain = s.writeChain.then(async () => {
           try {
             const buf = await blob.arrayBuffer();
-            await rekzora.rec.chunk(s.tempPath, new Uint8Array(buf));
+            await rekzora.rec.chunk(s.recordingId, new Uint8Array(buf));
+            s.queueDepth = Math.max(0, (s.queueDepth || 1) - 1);
           } catch (e2) {
             s.writeErrors++;
             err('chunk write failed:', e2 && e2.message);
@@ -458,13 +461,16 @@
               stop();
             }
           }
+          s.queueDepth = Math.max(0, (s.queueDepth || 1) - 1);
         });
       });
 
-      /* 9. Begin temp file, start recorder + timers */
-      const { tempPath } = await rekzora.rec.begin();
-      s.tempPath = tempPath;
-      s.writeChain = s.writeChain.then(() => rekzora.rec.chunk(tempPath, new Uint8Array(0))).catch(() => {});
+      /* 9. Begin temp file (opaque session id from the main process),
+         start recorder + timers */
+      const beginRes = await rekzora.rec.begin();
+      s.recordingId = beginRes && beginRes.recordingId;
+      if (!s.recordingId) throw new Error('Recording session was rejected by the main process');
+      s.writeChain = s.writeChain.then(() => rekzora.rec.chunk(s.recordingId, new Uint8Array(0))).catch(() => {});
 
       s.startTs = performance.now();
       s.pausedAcc = 0;
@@ -487,7 +493,7 @@
     } catch (e) {
       err('commit failed:', e && (e.stack || e.message));
       cleanup(s);
-      if (s.tempPath) rekzora.rec.discard(s.tempPath).catch(() => {});
+      if (s.recordingId) rekzora.rec.discard(s.recordingId).catch(() => {});
       rec.session = null;
       rec.pendingSession = null;
       setState(State.IDLE);
@@ -542,13 +548,13 @@
       cleanup(s);
       try {
         if (discard) {
-          if (s.tempPath) await rekzora.rec.discard(s.tempPath);
+          if (s.recordingId) await rekzora.rec.discard(s.recordingId);
           window.dispatchEvent(new CustomEvent('rekzora:recorder-saved', {
             detail: { discarded: true, durationMs }
           }));
         } else {
           const res = await rekzora.rec.finish({
-            tempPath: s.tempPath,
+            recordingId: s.recordingId,
             durationMs,
             meta: {
               type: s.cfg.sourceType || 'screen',
@@ -564,15 +570,34 @@
               thumb: s.thumb || null
             }
           });
-          window.dispatchEvent(new CustomEvent('rekzora:recorder-saved', {
-            detail: Object.assign({ discarded: false, durationMs }, res)
-          }));
+          const status = (res && res.status) || 'completed';
+          if (status === 'failed') {
+            /* the main process kept the footage where possible; surface it */
+            window.dispatchEvent(new CustomEvent('rekzora:recorder-error', {
+              detail: {
+                message: (res && res.reason) ||
+                  'Could not save the recording. Nothing was lost silently — check Library recovery later.'
+              }
+            }));
+          } else {
+            if (status === 'partial') {
+              window.dispatchEvent(new CustomEvent('rekzora:recorder-note', {
+                detail: {
+                  level: 'warn',
+                  message: (res && res.reason) || 'This recording saved with missing chunks — it may be shorter than expected.'
+                }
+              }));
+            }
+            window.dispatchEvent(new CustomEvent('rekzora:recorder-saved', {
+              detail: Object.assign({ discarded: false, durationMs }, res)
+            }));
+          }
         }
       } catch (e) {
         err('finish failed', e && e.message);
-        if (s.tempPath) await rekzora.rec.discard(s.tempPath).catch(() => {});
+        if (s.recordingId) await rekzora.rec.discard(s.recordingId).catch(() => {});
         window.dispatchEvent(new CustomEvent('rekzora:recorder-error', {
-          detail: { message: 'Could not save recording — it was lost. Check disk space and permissions.' }
+          detail: { message: 'Could not save recording — the take was not finalized. Check disk space and permissions.' }
         }));
       }
       rec.session = null;

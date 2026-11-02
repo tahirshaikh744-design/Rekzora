@@ -7,14 +7,37 @@
 
 const {
   app, BrowserWindow, ipcMain, desktopCapturer, dialog,
-  globalShortcut, Tray, Menu, nativeImage, shell, screen, session, powerMonitor
+  globalShortcut, Tray, Menu, nativeImage, shell, screen, session, powerMonitor,
+  protocol
 } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const fsp = fs.promises;
 const { spawn } = require('node:child_process');
+const { Readable } = require('node:stream');
 const os = require('node:os');
+const crypto = require('node:crypto');
 const clipboard = require('electron').clipboard;
+
+/* Recording IPC trust boundary, share launch registry, WebM validation,
+   crash-recovery manifests and the centralized IPC guard all live in the
+   lib/ modules so the regression suite can exercise them without Electron. */
+const { STATE, RegistryError, createRegistry, validateFinishMeta } = require('./lib/recording-session');
+const { createShareLauncher, validateLibraryId, isPlausibleExecutable, ShareError } = require('./lib/share-registry');
+const { checkWebM } = require('./lib/webm-check');
+const { createManifestStore } = require('./lib/manifest');
+const { ROLES, GuardError, createGuard, ROLE_CHANNELS } = require('./lib/ipc-guard');
+
+/* The player loads recordings through this custom, main-owned protocol:
+   rekzora-video://<libraryId>/v.webm → resolved via the library index, so a
+   renderer can point a <video> at arbitrary files. Range requests are
+   honored so seeking is instant. Must be registered before app ready. */
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'rekzora-video',
+    privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: false }
+  }
+]);
 
 const isDev = !app.isPackaged;
 const APP_NAME = 'Rekzora';
@@ -109,8 +132,65 @@ function cleanLibMeta(raw) {
     mic: !!raw.mic,
     systemAudio: raw.systemAudio !== undefined ? !!raw.systemAudio : false,
     webcam: !!raw.webcam,
-    region: raw.region || null
+    region: raw.region || null,
+    /* v1.1 additions: opaque record id + partial-recording honesty */
+    id: raw.id || null,
+    partial: raw.partial === true,
+    partialReason: raw.partialReason || null,
+    recovered: raw.recovered === true
   };
+}
+
+/* ---- opaque library record ids ----
+   The library key remains the absolute path (the main process's truth), but
+   the renderer receives and speaks only stable random ids. An id is valid
+   only while its recording actually exists inside the save directory. */
+function isLibraryId(value) {
+  return typeof value === 'string' && /^r_[a-z0-9]{12}$/.test(value);
+}
+function grantLibId(filePath) {
+  let id = libPaths.get(filePath);
+  if (id) return id;
+  /* 12 base36-ish chars from crypto randomness, checked for uniqueness */
+  for (let i = 0; i < 8; i++) {
+    const candidate = ('r_' + crypto.randomBytes(9).toString('base64url').toLowerCase()
+      .replace(/[^a-z0-9]/g, '').padEnd(12, '0')).slice(0, 14);
+    id = [...libIds.keys()].includes(candidate) ? null : candidate;
+    if (id) break;
+  }
+  if (!id) id = 'r_' + crypto.randomBytes(6).toString('hex'); // virtually impossible to need
+  libIds.set(id, filePath);
+  libPaths.set(filePath, id);
+  return id;
+}
+function revokeLibPath(filePath) {
+  const id = libPaths.get(filePath);
+  if (id) { libIds.delete(id); libPaths.delete(filePath); }
+  return id || null;
+}
+function resolveLibId(id) {
+  if (!isLibraryId(id)) return null;
+  const filePath = libIds.get(id);
+  if (!filePath) return null;
+  /* the mapping must resolve to a *current* recording inside the save dir */
+  if (!fs.existsSync(filePath)) return null;
+  return filePath;
+}
+/* Rebuild the id index from the library database at startup. */
+function rebuildLibIdIndex() {
+  libIds.clear();
+  libPaths.clear();
+  for (const [key, meta] of Object.entries(libDb.data)) {
+    if (!key || typeof key !== 'string') continue;
+    let id = (meta && meta.id) ? String(meta.id) : null;
+    if (!id || libIds.has(id)) {
+      id = grantLibId(key);
+      libSet(key, { ...cleanLibMeta(meta), id });
+    } else {
+      libIds.set(id, key);
+      libPaths.set(key, id);
+    }
+  }
 }
 
 /* One-time migration: absorb legacy `<video>.json` sidecars into the DB,
@@ -149,10 +229,27 @@ let quitting = false;   // set in before-quit so the close handler stops hiding 
 let recActive = false;
 let pendingSource = null;       // DesktopCapturerSource chosen for next getDisplayMedia
 let regionCtx = null;           // { bounds, scaleFactor, sourceId }
-const writeHandles = new Map(); // tempPath -> fs.FileHandle
 
-/* ---------------- Helpers ---------------- */
+/* ---- main-process-owned security surface (created in whenReady) ---- */
+let guard = null;            // ipc-guard: window registry + sender authorization
+let recRegistry = null;      // recording sessions: ids, states, ownership
+let manifestStore = null;    // crash-recovery manifests
+let shareLauncher = null;    // trusted share-app launcher
+const writeHandles = new Map(); // recordingId -> fs.FileHandle
+
+/* Library: path → {id, ...}. The renderer never sees paths from the list
+   and never sends them back; it speaks in opaque record ids only. */
+const libIds = new Map();    // recordingId -> absolute path
+const libPaths = new Map();  // absolute path -> recordingId</think><tool_call>edit<arg_key>newString</arg_key><arg_value>/* ---------------- Helpers ---------------- */
 function log(...a) { console.log(`[main] ${new Date().toISOString().slice(11, 19)}`, ...a); }
+
+function trustedUrlPrefix() {
+  try {
+    return require('node:url').pathToFileURL(__dirname).href + '/';
+  } catch {
+    return 'file://' + __dirname.replace(/\\/g, '/') + '/';
+  }
+}
 
 function ensureDirs() {
   saveDir = settings.get('saveDir') || getDefaultSaveDir();
@@ -208,7 +305,8 @@ function createMainWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,              // mild relaxation so the preload can use small Node APIs
+      sandbox: true,               // preload only uses contextBridge/ipcRenderer
+      additionalArguments: ['--rekzora-role=MAIN'],   // role signal for the preload
       backgroundThrottling: false, // critical: timers keep running while minimized/recording
       spellcheck: false
     }
@@ -227,12 +325,36 @@ function createMainWindow() {
 
   mainWin.on('closed', () => { mainWin = null; });
 
+  /* Navigation policy: the app content is static, local, and trusted —
+     any in-frame navigation away from it is refused, and popups are
+     denied outright (external links go through app:open-external). */
+  mainWin.webContents.on('will-navigate', (e, url) => {
+    if (!guardIsTrustedUrl(url)) { e.preventDefault(); log('navigation blocked:', url.slice(0, 100)); }
+  });
+  mainWin.webContents.setWindowOpenHandler(({ url }) => {
+    log('window.open blocked:', url.slice(0, 100));
+    return { action: 'deny' };
+  });
+  mainWin.webContents.on('will-attach-webview', (e) => { e.preventDefault(); });
+
+  guard.register(mainWin.webContents, ROLES.MAIN);
+
   // DevTools on F12 in dev builds
   mainWin.webContents.on('before-input-event', (_e, input) => {
     if (isDev && input.type === 'keyDown' && input.key === 'F12') {
       mainWin.webContents.toggleDevTools();
     }
   });
+}
+
+/* Navigation/src checks shared by every window */
+function guardIsTrustedUrl(url) {
+  try {
+    const prefix = trustedUrlPrefix();
+    return url === prefix || (typeof url === 'string' && url.startsWith(prefix));
+  } catch {
+    return false;
+  }
 }
 
 /* ---------------- Floating control bar ---------------- */
@@ -254,12 +376,19 @@ function ensureFloatWin() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
+      additionalArguments: ['--rekzora-role=FLOATING'],
       backgroundThrottling: false
     }
   });
   floatWin.setAlwaysOnTop(true, 'screen-saver');
   floatWin.loadFile(path.join(__dirname, 'src', 'floating', 'index.html'));
   floatWin.on('closed', () => { floatWin = null; });
+  floatWin.webContents.on('will-navigate', (e, url) => {
+    if (!guardIsTrustedUrl(url)) e.preventDefault();
+  });
+  floatWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  guard && guard.register(floatWin.webContents, ROLES.FLOATING);
   return floatWin;
 }
 
@@ -295,12 +424,19 @@ function showRegionOverlay(bounds, scaleFactor) {
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
         contextIsolation: true,
-        nodeIntegration: false
+        nodeIntegration: false,
+        sandbox: true,
+        additionalArguments: ['--rekzora-role=REGION']
       }
     });
     regionWin.setAlwaysOnTop(true, 'screen-saver');
     regionWin.loadFile(path.join(__dirname, 'src', 'region', 'index.html'));
     regionWin.on('closed', () => { regionWin = null; });
+    regionWin.webContents.on('will-navigate', (e, url) => {
+      if (!guardIsTrustedUrl(url)) e.preventDefault();
+    });
+    regionWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    guard && guard.register(regionWin.webContents, ROLES.REGION);
     regionWin.webContents.once('did-finish-load', () => {
       if (regionWin && !regionWin.isDestroyed()) {
         regionWin.setBounds(bounds);
@@ -389,70 +525,360 @@ function registerHotkeys() {
   }
 }
 
-/* ---------------- Recording file I/O ---------------- */
-async function beginRecordingFile() {
-  ensureDirs();
-  // Clean stale temps older than 24h
+/* ---------------- Recording file I/O (session-owned) ----------------
+   The renderer only ever sees an opaque recordingId. Temp paths, handles
+   and the final destination are generated and used inside this module.
+   ---------------------------------------------------------------------- */
+const sessionQueues = new Map();   // recordingId → write-chain promise
+const WRITE_ERRORS_SOFT_STOP = 5;
+
+function senderOf(event) {
+  return { wcId: event.sender.id, role: (guard && guard.roleOf(event.sender.id)) || 'MAIN' };
+}
+
+/* Retention policy (§6.4): a temp file is "abandoned" only if it has no
+   manifest AND zero content. Files with a manifest are ride crash-recovery
+   candidates — the recovery UI decides their fate, never this cleanup. */
+async function cleanupAbandonedTemps() {
   try {
     const files = await fsp.readdir(tmpDir);
     for (const f of files) {
+      if (!/^rec-[0-9a-f]{32}\.webm$/i.test(f)) continue;
       const p = path.join(tmpDir, f);
       const st = await fsp.stat(p).catch(() => null);
-      if (st && Date.now() - st.mtimeMs > 86_400_000) await fsp.rm(p, { force: true }).catch(() => {});
+      if (!st || !st.isFile() || st.size > 0) continue;
+      const m = manifestStore && await manifestStore.load(f.slice(4, -5)).catch(() => null);
+      if (!m) {
+        await fsp.rm(p, { force: true }).catch(() => {});
+        log('cleaned empty abandoned temp', f);
+      } else if (m.finalization === 'discarded') {
+        await fsp.rm(p, { force: true }).catch(() => {});
+        await manifestStore.remove(f.slice(4, -5)).catch(() => {});
+      }
     }
   } catch { /* ignore */ }
-
-  const tempPath = path.join(tmpDir, `rec-${Date.now()}-${Math.floor(Math.random() * 1e6)}.webm`);
-  const handle = await fsp.open(tempPath, 'w');
-  writeHandles.set(tempPath, handle);
-  return { tempPath };
 }
 
-async function appendChunk(tempPath, data) {
-  const handle = writeHandles.get(tempPath);
-  if (!handle) throw new Error('No open file for chunk');
-  const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
-  await handle.write(buf);
+/* Begin → session id + private temp file + first manifest. */
+async function beginRecordingSession(event) {
+  ensureDirs();
+  await cleanupAbandonedTemps();
+  const session = recRegistry.create({
+    wcId: event.sender.id,
+    role: (guard && guard.roleOf(event.sender.id)) || 'MAIN'
+  });
+  try {
+    const handle = await fsp.open(session.tempTarget, 'w');
+    writeHandles.set(session.recordingId, handle);
+  } catch (e) {
+    try { recRegistry.transit(session, STATE.FAILED); recRegistry.forget(session.recordingId); } catch { /* */ }
+    log('rec begin failed:', e && e.message);
+    throw new Error('Could not create the recording file (disk write error)');
+  }
+  try {
+    await manifestStore.saveNow(session.recordingId, {
+      sessionId: session.recordingId,
+      tempFileName: path.basename(session.tempTarget),
+      state: session.state,
+      bytesCommitted: 0,
+      chunksCommitted: 0
+    });
+  } catch (e) { log('manifest write failed (recording still fine):', e && e.message); }
+  return { recordingId: session.recordingId };
+}
+
+/* Per-session serialized writes (order matters for a webm stream) */
+function enqueueChunkWrite(session, buf) {
+  const prev = sessionQueues.get(session.recordingId) || Promise.resolve();
+  const next = prev.then(
+    () => writeChunkToDisk(session.recordingId, buf),
+    () => writeChunkToDisk(session.recordingId, buf) // keep the chain alive
+  );
+  sessionQueues.set(session.recordingId, next);
+  return next;
+}
+
+async function writeChunkToDisk(recordingId, buf) {
+  const handle = writeHandles.get(recordingId);
+  if (!handle) throw new Error('recording file is closed');
+  if (buf && buf.byteLength > 0) await handle.write(buf);
+  return buf ? buf.byteLength : 0;
+}
+
+let manifestTick = 0;
+async function maybeManifestProgress(session) {
+  /* durable progress every 8 committed chunks; the store's internal
+     debounce (750 ms) keeps consecutive calls from stampeding the disk */
+  if (session.chunks === 0 || session.chunks % 8 !== 0) return;
+  manifestTick++;
+  try {
+    await manifestStore.save(session.recordingId, {
+      sessionId: session.recordingId,
+      tempFileName: path.basename(session.tempTarget),
+      state: session.state,
+      bytesCommitted: session.bytes,
+      chunksCommitted: session.chunks,
+      writeFailures: session.writeErrors,
+      lastWriteAt: Date.now()
+    }, { debounceMs: 750 });
+  } catch { /* best-effort */ }
+}
+
+/* Drain pending writes before finalization (bounded, never hangs forever) */
+async function drainSession(session, timeoutMs = 10_000) {
+  const t0 = Date.now();
+  while (session.pendingWrites > 0 && Date.now() - t0 < timeoutMs) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return session.pendingWrites === 0;
+}
+
+/* Finalization: validate the temp container, then commit it atomically.
+   - uniquePath saves us from ever overwriting an existing recording
+   - renames are retried (AV/indexer can hold EBUSY/EPERM locks briefly)
+   - cross-volume moves go copy → verify → rename, never a silent truncate */
+function isTransientFsError(e) {
+  return e && ['EBUSY', 'EPERM', 'EACCES', 'EDEADLK', 'EAGAIN'].includes(e.code);
+}
+async function finalizeMove(tempPath, finalPath) {
+  let delay = 150;
+  for (let i = 0; i < 4; i++) {
+    try { await fsp.rename(tempPath, finalPath); return true; }
+    catch (e) {
+      if (e && e.code === 'EXDEV') break;             // different volume
+      if (!isTransientFsError(e)) throw e;
+      await new Promise((r) => setTimeout(r, delay));
+      delay *= 2;
+    }
+  }
+  /* cross-volume fallback: copy to `finalPath.part`, byte-verify, rename */
+  const partPath = finalPath + '.part-' + crypto.randomBytes(4).toString('hex');
+  await fsp.copyFile(tempPath, partPath);
+  const a = await fsp.stat(tempPath);
+  const b = await fsp.stat(partPath);
+  if (b.size !== a.size) throw new Error('copy verification failed');
+  try {
+    await fsp.rename(partPath, finalPath);
+  } catch (e) {
+    await fsp.rm(partPath, { force: true }).catch(() => {});
+    throw e;
+  }
+  await fsp.rm(tempPath, { force: true }).catch(() => {});
   return true;
 }
 
-async function finishRecordingFile({ tempPath, durationMs, meta }) {
-  const handle = writeHandles.get(tempPath);
-  if (handle) { try { await handle.close(); } catch {} writeHandles.delete(tempPath); }
-
-  const base = sanitizeName(`Screen Recording ${dateStamp()}`);
-  const finalPath = uniquePath(saveDir, base, '.webm');
+async function readHeadForCheck(tempPath, max) {
+  const handle = await fsp.open(tempPath, 'r');
   try {
-    await fsp.rename(tempPath, finalPath);
-  } catch (e) {
-    // Cross-device fallback: copy + delete
-    await fsp.copyFile(tempPath, finalPath);
-    await fsp.rm(tempPath, { force: true });
+    const buf = Buffer.alloc(Math.min(max, 16 * 1024 * 1024));
+    const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+    return buf.subarray(0, bytesRead);
+  } finally {
+    await handle.close().catch(() => {});
   }
-  const st = await fsp.stat(finalPath);
-  libSet(finalPath, cleanLibMeta({
-    title: path.basename(finalPath, '.webm'),
-    fileName: path.basename(finalPath),
-    created: st.birthtimeMs,
-    durationMs: durationMs || 0,
-    size: st.size,
-    ...meta
-  }));
-  broadcastRecordingsChanged();
-  return { path: finalPath, fileName: path.basename(finalPath), size: st.size, durationMs };
 }
 
-async function discardRecordingFile(tempPath) {
-  const handle = writeHandles.get(tempPath);
-  if (handle) { try { await handle.close(); } catch {} writeHandles.delete(tempPath); }
+async function finalizeSession(session, { durationMs, meta }) {
+  const id = session.recordingId;
+  const tempPath = session.tempTarget;
+
+  const handle = writeHandles.get(id);
+  if (handle) {
+    writeHandles.delete(id);
+    try { await handle.close(); } catch { /* already closed */ }
+  }
+  sessionQueues.delete(id);
+
+  /* outcome by evidence: empty or cluster-less temp is NOT a recording */
+  let status = STATE.COMPLETED;
+  let partialReason = null;
+  let keptTemp = false;
+  const stat = await fsp.stat(tempPath).catch(() => null);
+  if (!stat || !stat.isFile() || stat.size === 0) {
+    status = STATE.FAILED;
+    partialReason = 'the recording is empty (nothing was written)';
+  } else {
+    try {
+      const head = await readHeadForCheck(tempPath, 4 * 1024 * 1024);
+      const webm = checkWebM(head);
+      if (!webm.hasCluster) {
+        status = STATE.FAILED;
+        partialReason = 'the container is broken (no playable media found)';
+      } else if (session.writeErrors > 0) {
+        status = STATE.PARTIAL;
+        partialReason = `${session.writeErrors} chunk write failure(s) — the video may be truncated`;
+      }
+    } catch (e) {
+      status = STATE.PARTIAL;
+      partialReason = `container check could not run (${e && e.message})`;
+    }
+  }
+
+  const finalBase = sanitizeName(`Screen Recording ${dateStamp()}`);
+  const finalPath = uniquePath(saveDir, finalBase, '.webm');
+
+  try {
+    if (status === STATE.FAILED) {
+      if (!stat || stat.size === 0) {
+        await fsp.rm(tempPath, { force: true }).catch(() => {});
+        await manifestStore.remove(id).catch(() => {});
+        recRegistry.transit(session, STATE.FAILED);
+        recRegistry.forget(id);
+        return { status: 'failed', reason: partialReason, recordingId: id };
+      }
+      /* non-empty garbage: keep the file + manifest; the recovery UI lets
+         the user inspect/delete it. Never silently destroyed. */
+      keptTemp = true;
+      await manifestStore.saveNow(id, {
+        sessionId: id,
+        tempFileName: path.basename(tempPath),
+        state: 'FAILED',
+        bytesCommitted: stat.size,
+        chunksCommitted: session.chunks,
+        writeFailures: session.writeErrors,
+        finalization: 'failed',
+        lastWriteAt: Date.now()
+      });
+      recRegistry.transit(session, STATE.FAILED);
+      recRegistry.forget(id);
+      return { status: 'failed', reason: partialReason, recordingId: id };
+    }
+
+    await finalizeMove(tempPath, finalPath);
+    const st = await fsp.stat(finalPath);
+    const gid = grantLibId(finalPath);
+    libSet(finalPath, cleanLibMeta({
+      title: path.basename(finalPath, '.webm'),
+      fileName: path.basename(finalPath),
+      created: st.birthtimeMs,
+      durationMs: durationMs || 0,
+      size: st.size,
+      partial: status === STATE.PARTIAL,
+      partialReason,
+      id: gid,
+      ...meta
+    }));
+    await manifestStore.remove(id).catch(() => {});
+    recRegistry.transit(session, status);
+    recRegistry.forget(id);
+    broadcastRecordingsChanged();
+    return {
+      status: status === STATE.PARTIAL ? 'partial' : 'completed',
+      reason: partialReason,
+      recordingId: id,
+      id: gid,
+      path: finalPath,
+      fileName: path.basename(finalPath),
+      size: st.size,
+      durationMs: durationMs || 0
+    };
+  } catch (e) {
+    log('finalization failed:', e && (e.stack || e.message));
+    /* finalization error → keep temp + manifest, mark failed; the next launch
+       scans it as a recovery candidate (nothing user-visible is destroyed) */
+    try {
+      await manifestStore.saveNow(id, {
+        sessionId: id,
+        tempFileName: path.basename(tempPath),
+        state: 'FAILED',
+        bytesCommitted: session.bytes,
+        chunksCommitted: session.chunks,
+        writeFailures: session.writeErrors,
+        finalization: 'failed',
+        lastWriteAt: Date.now()
+      });
+    } catch { /* best effort */ }
+    recRegistry.transit(session, STATE.FAILED);
+    recRegistry.forget(id);
+    return { status: 'failed', reason: `saving failed (${e && e.message})`, recordingId: id };
+  }
+}
+
+/* Discard: renderer decides to throw the take away. Chunk writes may still
+   be in flight → drain first, then destroy the temp. */
+async function discardSession(event, recordingId) {
+  const session = recRegistry.authorizeDiscard(recordingId, senderOf(event));
+  const id = session.recordingId;
+  await drainSession(session, 5000);
+  const handle = writeHandles.get(id);
+  if (handle) {
+    writeHandles.delete(id);
+    try { await handle.close(); } catch { /* */ }
+  }
+  sessionQueues.delete(id);
+  const tempPath = session.tempTarget;
   if (tempPath && isInsideDir(tempPath, tmpDir)) {
     await fsp.rm(tempPath, { force: true }).catch(() => {});
   }
+  await manifestStore.remove(id).catch(() => {});
+  if (session.state !== STATE.DISCARDED) recRegistry.transit(session, STATE.DISCARDED);
+  recRegistry.forget(id);
   return true;
 }
 
 function broadcastRecordingsChanged() {
   sendToMain('recordings:changed', { t: Date.now() });
+}
+
+/* ---------------- Player media protocol ----------------
+   rekzora-video://<libraryId>/video serves one thing: the bytes of the
+   library recording that id resolves to. Byte-range support keeps
+   seeking instant. Any other id/path is a hard 404. */
+function setupPlaybackProtocol() {
+  protocol.handle('rekzora-video', async (request) => {
+    try {
+      const u = new URL(request.url);
+      const recordingId = u.hostname;
+      const filePath = resolveLibId(recordingId);
+      if (!filePath || !isInsideDir(filePath, saveDir) || path.dirname(filePath) !== saveDir ||
+          !/\.webm$/i.test(filePath)) {
+        return new Response('not found', { status: 404 });
+      }
+      let stat;
+      try { stat = await fsp.stat(filePath); } catch { return new Response('gone', { status: 404 }); }
+      if (!stat.isFile()) return new Response('not a file', { status: 404 });
+
+      const fileSize = stat.size;
+      const range = request.headers.get('range');
+      const baseHeaders = {
+        'Content-Type': 'video/webm',
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'no-store'
+      };
+      if (range) {
+        const m = /^bytes=(\d*)-(\d*)$/.exec(String(range));
+        if (!m) return new Response('bad range', { status: 416 });
+        let start = m[1] === '' ? null : parseInt(m[1], 10);
+        let end = m[2] === '' ? null : parseInt(m[2], 10);
+        if (start === null && end !== null) { start = Math.max(0, fileSize - end); end = fileSize - 1; }
+        if (start === null) start = 0;
+        if (end === null || end >= fileSize) end = fileSize - 1;
+        if (start > end || start >= fileSize) {
+          return new Response('range not satisfiable', {
+            status: 416,
+            headers: { 'Content-Range': `bytes */${fileSize}` }
+          });
+        }
+        const stream = Readable.toWeb(fs.createReadStream(filePath, { start, end }));
+        return new Response(stream, {
+          status: 206,
+          headers: {
+            ...baseHeaders,
+            'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+            'Content-Length': String(end - start + 1)
+          }
+        });
+      }
+      const stream = Readable.toWeb(fs.createReadStream(filePath));
+      return new Response(stream, {
+        status: 200,
+        headers: { ...baseHeaders, 'Content-Length': String(fileSize) }
+      });
+    } catch (e) {
+      log('playback error:', e && e.message);
+      return new Response('error', { status: 500 });
+    }
+  });
 }
 
 async function listRecordings() {
@@ -466,9 +892,11 @@ async function listRecordings() {
     try {
       const st = await fsp.stat(p);
       if (!st.isFile()) continue;
+      const stored = libGet(p) || {};
+      if (!stored.id) libSet(p, { ...stored, id: grantLibId(p) });
       const meta = cleanLibMeta(libGet(p)) || {};
       entries.push({
-        path: p,
+        id: meta.id || grantLibId(p),
         fileName: f,
         title: meta.title || path.basename(f, '.webm'),
         size: st.size,
@@ -481,15 +909,21 @@ async function listRecordings() {
         quality: meta.quality || null,
         resolution: meta.resolution || null,
         mic: !!meta.mic,
-        systemAudio: !!meta.systemAudio
+        systemAudio: !!meta.systemAudio,
+        webcam: !!meta.webcam,
+        partial: !!meta.partial,
+        recovered: !!meta.recovered
       });
     } catch { /* skip unreadable */ }
   }
   entries.sort((a, b) => b.created - a.created);
-  // Drop stale DB entries (files deleted outside the app)
-  const alive = new Set(entries.map(e => e.path));
+  /* Drop stale DB entries (files deleted outside the app) — and forget
+     their opaque ids, which die with the recording. */
   for (const key of Object.keys(libDb.data)) {
-    if (key.startsWith(saveDir) && !alive.has(key)) libRemove(key);
+    if (key.toLowerCase().endsWith('.webm') && !fs.existsSync(key)) {
+      revokeLibPath(key);
+      libRemove(key);
+    }
   }
   return entries;
 }
@@ -681,11 +1115,30 @@ async function detectShareApps(force = false) {
   return apps;
 }
 
-/* ---------------- IPC ---------------- */
+/* ---------------- IPC ----------------
+   Every channel is registered through H()/ON(), which run the centralized
+   sender authorization (registered window + role + main frame + trusted
+   URL) before the handler body — see lib/ipc-guard.js. */
 function registerIpc() {
+  /** authorized ipcMain.handle — handler signature: (args, event) */
+  const H = (channel, handler) => {
+    ipcMain.handle(channel, async (event, ...args) => {
+      guard.authorize(event.sender, channel);
+      return handler(args, event);
+    });
+  };
+  /** authorized ipcMain.on */
+  const ON = (channel, handler) => {
+    ipcMain.on(channel, (event, ...args) => {
+      try { guard.authorize(event.sender, channel); }
+      catch (e) { log('ipc denied', channel, e && e.message); return; }
+      handler(args, event);
+    });
+  };
+
   /* settings */
-  ipcMain.handle('settings:get', () => ({ ...settings.data, appVersion: APP_VERSION }));
-  ipcMain.handle('settings:set', (_e, patch) => {
+  H('settings:get', () => ({ ...settings.data, appVersion: APP_VERSION }));
+  H('settings:set', ([patch]) => {
     const clean = {};
     const allowed = ['theme', 'themeMigrated', 'mode', 'fps', 'quality', 'resolution', 'countdown', 'mic', 'sysAudio', 'webcam',
       'saveDir', 'hotkeyToggle', 'hotkeyPause', 'closeToTray', 'eulaAccepted'];
@@ -700,7 +1153,7 @@ function registerIpc() {
   });
 
   /* sources */
-  ipcMain.handle('sources:get', async () => {
+  H('sources:get', async () => {
     const sources = await desktopCapturer.getSources({
       types: ['screen', 'window'],
       thumbnailSize: { width: 448, height: 252 },
@@ -726,7 +1179,7 @@ function registerIpc() {
     return out.sort((a, b) => (a.type === b.type ? 0 : a.type === 'screen' ? -1 : 1));
   });
 
-  ipcMain.handle('capture:select-source', async (_e, sourceId) => {
+  H('capture:select-source', async ([sourceId]) => {
     try {
       const sources = await desktopCapturer.getSources({
         types: ['screen', 'window'], thumbnailSize: { width: 1, height: 1 }
@@ -740,7 +1193,7 @@ function registerIpc() {
 
   /* Fast path for hotkey starts: primary screen only, 1x1 thumbnails, no
      window enumeration — returns in milliseconds instead of seconds. */
-  ipcMain.handle('screen:primary-fast', async () => {
+  H('screen:primary-fast', async () => {
     try {
       const pd = screen.getPrimaryDisplay();
       const sources = await desktopCapturer.getSources({
@@ -763,51 +1216,131 @@ function registerIpc() {
     } catch (e) { log('primary-fast err', e); return null; }
   });
 
-  /* recording file pipeline */
-  ipcMain.handle('rec:begin', () => beginRecordingFile());
-  ipcMain.handle('rec:chunk', (_e, tempPath, data) => appendChunk(tempPath, data));
-  ipcMain.handle('rec:finish', (_e, payload) => finishRecordingFile(payload));
-  ipcMain.handle('rec:discard', (_e, tempPath) => discardRecordingFile(tempPath));
+  /* recording file pipeline — renderer speaks ONLY in opaque session ids; all
+     paths/permissions live here (P0 fix for the renderer-tempPath issue). */
+  H('rec:begin', (args, event) => beginRecordingSession(event));
 
-  ipcMain.on('rec:state', (_e, state) => {
+  H('rec:chunk', async (args, event) => {
+    const [recordingId, data] = args;
+    const { session, data: buf } = recRegistry.acceptChunk(recordingId, senderOf(event), data);
+    try {
+      const size = await enqueueChunkWrite(session, buf);
+      recRegistry.recordChunkResult(session.recordingId, { size });
+      maybeManifestProgress(session).catch(() => {});
+      return { ok: true };
+    } catch (e) {
+      recRegistry.recordChunkResult(session.recordingId, { failed: true });
+      if (session.writeErrors >= WRITE_ERRORS_SOFT_STOP) {
+        /* tell the renderer to wrap up gracefully; chunks are already on
+           disk for the seconds it captured so far */
+        sendToMain('recorder:action', { action: 'write-failure' });
+        session.writeErrors = -1; // notify once per flood
+      }
+      throw e;
+    }
+  });
+
+  H('rec:finish', async (args, event) => {
+    const [payload] = args;
+    const senderInfo = senderOf(event);
+    if (!payload || typeof payload !== 'object') throw new Error('finish payload must be an object');
+    const safeMeta = validateFinishMeta({
+      durationMs: payload.durationMs,
+      type: payload.meta?.type, sourceName: payload.meta?.sourceName,
+      fps: payload.meta?.fps, quality: payload.meta?.quality,
+      resolution: payload.meta?.resolution, mic: payload.meta?.mic,
+      systemAudio: payload.meta?.systemAudio, webcam: payload.meta?.webcam,
+      region: payload.meta?.region, displayBounds: payload.meta?.displayBounds,
+      thumb: payload.meta?.thumb
+    });
+    const session = recRegistry.authorizeFinish(payload.recordingId, senderInfo);
+    recRegistry.transit(session, STATE.STOPPING);
+    try {
+      await manifestStore.saveNow(session.recordingId, {
+        sessionId: session.recordingId,
+        tempFileName: path.basename(session.tempTarget),
+        state: session.state,
+        bytesCommitted: session.bytes,
+        chunksCommitted: session.chunks,
+        writeFailures: session.writeErrors,
+        finalization: 'pending',
+        lastWriteAt: Date.now()
+      });
+    } catch { /* best-effort */ }
+    /* all dispatched chunks must be on disk before the temp handle closes */
+    await drainSession(session);
+    recRegistry.transit(session, STATE.FINALIZING);
+    return finalizeSession(session, { durationMs: safeMeta.durationMs || 0, meta: safeMeta });
+  });
+
+  H('rec:discard', (args, event) => discardSession(event, args[0]));
+
+  ON('rec:state', ([state]) => {
     recActive = ['recording', 'paused', 'stopping'].includes(state?.state);
     if (tray) rebuildTrayMenu();
     if (floatWin && !floatWin.isDestroyed()) floatWin.webContents.send('float:state', state);
   });
 
-  /* recordings library */
-  ipcMain.handle('recordings:list', () => listRecordings());
-  ipcMain.handle('recording:delete', async (_e, filePath) => {
-    if (!isInsideDir(filePath, saveDir)) throw new Error('Invalid path');
+  /* recordings library — the renderer uses opaque ids; paths never cross IPC */
+  H('recordings:list', () => listRecordings());
+  H('recording:delete', async ([id]) => {
+    const filePath = resolveLibId(id);
+    if (!filePath) throw new Error('Unknown recording');
+    if (!isInsideDir(filePath, saveDir) || path.dirname(filePath) !== saveDir) throw new Error('Invalid recording');
     await fsp.rm(filePath, { force: true }).catch(() => {});
     libRemove(filePath);
+    revokeLibPath(filePath);
     broadcastRecordingsChanged();
     return true;
   });
-  ipcMain.handle('recording:rename', async (_e, { path: filePath, newName }) => {
-    if (!isInsideDir(filePath, saveDir)) throw new Error('Invalid path');
+  H('recording:rename', async ([id, newName]) => {
+    const filePath = resolveLibId(id);
+    if (!filePath) throw new Error('Unknown recording');
+    if (!isInsideDir(filePath, saveDir) || path.dirname(filePath) !== saveDir) throw new Error('Invalid recording');
     const base = sanitizeName(newName);
     const dir = path.dirname(filePath);
     const ext = path.extname(filePath) || '.webm';
     const target = uniquePath(dir, base, ext);
-    if (target !== filePath) await fsp.rename(filePath, target);
-    const meta = libGet(filePath) || {};
+    if (target !== filePath) {
+      try {
+        await fsp.rename(filePath, target);
+      } catch (e) {
+        if (!isTransientFsError(e)) throw e;
+        await new Promise((r) => setTimeout(r, 250));
+        await fsp.rename(filePath, target);
+      }
+    }
     const st = await fsp.stat(target);
+    const meta = libGet(filePath) || {};
+    const keepId = revokeLibPath(filePath) || grantLibId(target); // ids survive renames
     libRemove(filePath);
-    libSet(target, cleanLibMeta({
+    if (keepId) { libIds.set(keepId, target); libPaths.set(target, keepId); }
+    libSet(target, {
       ...meta,
       title: path.basename(target, ext),
       fileName: path.basename(target),
-      size: st.size
-    }));
+      size: st.size,
+      partial: meta.partial === true,
+      id: keepId
+    });
     broadcastRecordingsChanged();
-    return target;
+    return keepId;
   });
-  ipcMain.handle('recording:open', (_e, filePath) => {
+  H('recording:open', ([id]) => {
+    const filePath = resolveLibId(id);
+    if (!filePath) throw new Error('Unknown recording');
     shell.showItemInFolder(filePath);
     return true;
   });
-  ipcMain.handle('recordings:folder-pick', async () => {
+  /* deliberate reverse channel: the UI's "Copy file path" action needs the
+     real path for the clipboard; the renderer gets it only as a reply to an
+     explicit user gesture on a library-owned id */
+  H('recording:path', ([id]) => {
+    const filePath = resolveLibId(id);
+    if (!filePath || path.dirname(filePath) !== saveDir) throw new Error('Unknown recording');
+    return filePath;
+  });
+  H('recordings:folder-pick', async () => {
     const res = await dialog.showOpenDialog(mainWin, {
       title: 'Choose recordings folder',
       defaultPath: saveDir,
@@ -818,33 +1351,41 @@ function registerIpc() {
     ensureDirs();
     return settings.get('saveDir');
   });
-  ipcMain.handle('recordings:folder-open', () => { shell.openPath(saveDir); return true; });
+  H('recordings:folder-open', () => { shell.openPath(saveDir); return true; });
 
   /* region overlay */
-  ipcMain.handle('region:begin', async (_e, { sourceId, bounds, scaleFactor }) => {
+  H('region:begin', ([payload]) => {
+    const { sourceId, bounds, scaleFactor } = payload || {};
+    if (!bounds || typeof bounds !== 'object' ||
+        ![bounds.x, bounds.y, bounds.width, bounds.height].every((v) => Number.isFinite(v)) ||
+        bounds.width < 8 || bounds.height < 8 ||
+        bounds.width > 16384 || bounds.height > 16384) {
+      throw new GuardError('SCHEMA', 'region bounds out of range');
+    }
     regionCtx = { sourceId, bounds, scaleFactor: scaleFactor || 1 };
     showRegionOverlay(bounds, scaleFactor);
     return true;
   });
-  ipcMain.handle('region:get-bounds', () => regionCtx);
-  ipcMain.on('region:done', (_e, rect) => {
+  H('region:get-bounds', () => regionCtx);
+  ON('region:done', ([rect]) => {
     closeRegionOverlay();
-    sendToMain('region:result', { rect });
+    sendToMain('region:result', { rect: validRegionRect(rect) });
   });
-  ipcMain.on('region:cancel', () => {
+  ON('region:cancel', () => {
     closeRegionOverlay();
     sendToMain('region:result', { rect: null });
   });
 
   /* float */
-  ipcMain.handle('float:show', (_e, bounds) => { showFloat(bounds); return true; });
-  ipcMain.handle('float:hide', () => { hideFloat(); return true; });
-  ipcMain.on('float:action', (_e, action) => {
+  H('float:show', ([bounds]) => { showFloat(validRegionRect(bounds) || undefined); return true; });
+  H('float:hide', () => { hideFloat(); return true; });
+  ON('float:action', ([action]) => {
+    if (typeof action !== 'string' || !/^[a-z-]{2,24}$/.test(action)) return;
     sendToMain('recorder:action', { source: 'float', action });
   });
 
   /* window controls */
-  ipcMain.on('app:window', (_e, cmd) => {
+  ON('app:window', ([cmd]) => {
     if (!mainWin || mainWin.isDestroyed()) return;
     switch (cmd) {
       case 'minimize': mainWin.minimize(); break;
@@ -858,10 +1399,10 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('app:version', () => ({ version: APP_VERSION, platform: process.platform }));
+  H('app:version', () => ({ version: APP_VERSION, platform: process.platform }));
 
   /* Hard quit — used by the first-run Privacy Policy dialog ("I Disagree"). */
-  ipcMain.on('app:quit', () => {
+  ON('app:quit', () => {
     log('quit requested (EULA declined)');
     try { if (tray) tray.destroy(); } catch { /* */ }
     for (const w of BrowserWindow.getAllWindows()) { try { w.destroy(); } catch { /* */ } }
@@ -869,27 +1410,32 @@ function registerIpc() {
   });
 
   /* renderer logging (for smoke tests & debugging) */
-  ipcMain.on('app:log', (_e, args) => {
-    try { console.log('[renderer]', ...args); } catch { /* ignore */ }
+  ON('app:log', ([args]) => {
+    try { console.log('[renderer]', ...(Array.isArray(args) ? args.slice(0, 10).map(String) : ['(bad payload)'])); } catch { /* ignore */ }
   });
 
-  /* open external links */
-  ipcMain.on('app:open-external', (_e, url) => {
-    if (typeof url === 'string' && /^https?:\/\//.test(url)) shell.openExternal(url);
+  /* open external links — https only (audit C5: http: dropped on purpose; the
+     EULA/notice links inside the app are all https) */
+  ON('app:open-external', ([url]) => {
+    if (typeof url === 'string' && /^https:\/\//i.test(url) && url.length <= 2048) shell.openExternal(url);
   });
 
   /* clipboard */
-  ipcMain.handle('app:clipboard-write', (_e, text) => {
-    clipboard.writeText(String(text ?? ''));
+  H('app:clipboard-write', ([text]) => {
+    clipboard.writeText(String(text ?? '').slice(0, 8192));
     return true;
   });
 
-  /* native OS drag-out: drag files from Lumin into other apps
-     (Quick Share / SHAREit / WhatsApp / Explorer / any drop zone) */
+  /* native OS drag-out: drag a LIBRARY recording into other apps
+     (Quick Share / SHAREit / WhatsApp / Explorer / any drop zone)
+     — id-based, so only real records can ever be dragged (P0 fix). */
   let dragIcon = null;
-  ipcMain.on('app:drag-start', (event, filePath) => {
+  ON('app:drag-start', (args, event) => {
     try {
-      if (typeof filePath !== 'string' || !existsSync(filePath)) return;
+      const [recordingId] = args;
+      const filePath = resolveLibId(recordingId);
+      if (!filePath) { log('drag denied: unknown recording id'); return; }
+      if (!existsSync(filePath) || path.dirname(filePath) !== saveDir) return;
       if (!dragIcon || dragIcon.isEmpty()) {
         dragIcon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon.png'))
           .resize({ width: 32, height: 32 });
@@ -899,27 +1445,41 @@ function registerIpc() {
     } catch (e) { log('drag start failed', e); }
   });
 
-  /* share */
-  ipcMain.handle('share:apps', (_e, opts) => detectShareApps(!!(opts && opts.force)));
-  ipcMain.handle('share:launch', (_e, { exe, args }) => {
-    try {
-      if (!exe || !existsSync(exe)) return false;
-      const child = spawn(exe, args || [], { detached: true, stdio: 'ignore' });
-      child.unref();
-      return true;
-    } catch (e) { log('share launch failed', e); return false; }
+  /* share — detection keeps exe paths in the main process; the renderer gets
+     ids + display names, and launching takes {appId, recordingId} (P0 fix). */
+  H('share:apps', async ([opts]) => {
+    const apps = await detectShareApps(!!(opts && opts.force));
+    /* strip resolver-only fields: no exe/args leak across IPC */
+    return apps.map((a) => ({ id: a.id, name: a.name, ico: a.ico, available: !!a.exe }));
   });
-  ipcMain.handle('share:openwith', (_e, filePath) => {
+  H('share:launch', ([payload]) => shareLauncher.launch(payload));
+  H('share:openwith', ([recordingId]) => {
+    const filePath = resolveLibId(recordingId);
+    if (!filePath) throw new Error('Unknown recording');
+    if (path.dirname(filePath) !== saveDir) throw new Error('Invalid recording');
     try {
-      const child = spawn('OpenWith.exe', [filePath], { detached: true, stdio: 'ignore' });
+      const child = spawn('OpenWith.exe', [filePath], { shell: false, detached: true, stdio: 'ignore' });
       child.unref();
       return true;
     } catch (e) { log('openwith failed', e); return false; }
   });
 }
 
+/* region/float bounds sanity: numbers clamped into sane desktop ranges */
+function validRegionRect(rect) {
+  if (!rect || typeof rect !== 'object') return null;
+  const n = (v, lo, hi) => (Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.round(v))) : null);
+  const x = n(rect.x, -16384, 16384), y = n(rect.y, -16384, 16384);
+  const w = n(rect.width ?? rect.w, 1, 16384), h = n(rect.height ?? rect.h, 1, 16384);
+  if (w === null || h === null) return null;
+  return { x: x ?? 0, y: y ?? 0, width: w, height: h, w, h };
+}
+
 /* ---------------- Headless smoke test ---------------- */
+/* Exit semantics (§15.1): SUCCESS ONLY after every assertion passes; any
+   failure exits non-zero. The 3 s fallback quit is not unconditional exit(0). */
 async function runSmokeTest() {
+  let smokeFailed = false;
   try {
     log('[smoke] armed, waiting 2.5s');
     await new Promise(r => setTimeout(r, 2500));
@@ -951,22 +1511,73 @@ async function runSmokeTest() {
       })().catch((e) => { P('inner error: ' + String(e && e.message || e)); resolve({ ok: false, why: String(e && e.message || e) }); });
     }))`, true);
     log('[smoke] result:', JSON.stringify(res));
-    if (res && res.ok && res.detail && res.detail.path) {
-      const exists = fs.existsSync(res.detail.path);
-      const listing = await listRecordings();
-      const sidecars = (await fsp.readdir(saveDir)).filter(f => f.endsWith('.json'));
-      log('[smoke] file exists:', exists, '| library entries:', listing.length, '| sidecar jsons:', sidecars.length);
-      // clean up the test artifact
-      if (exists) await fsp.rm(res.detail.path, { force: true });
-      libRemove(res.detail.path);
+
+    const detail = res && res.detail;
+    if (!res || !res.ok) {
+      log('[smoke] FAILED: renderer start/stop flow reported failure:', res && res.why);
+      smokeFailed = true;
+    } else if (!detail || detail.discarded || detail.status !== 'completed') {
+      log('[smoke] FAILED: recording did not complete cleanly:', JSON.stringify(detail || null));
+      smokeFailed = true;
+    } else {
+      /* evidence checks: file exists, non-empty, structurally valid WebM,
+         library has the entry, duration sane for a 3 s recording */
+      const exists = detail.path && fs.existsSync(detail.path);
+      if (!exists) {
+        log('[smoke] FAILED: finalized file is missing on disk');
+        smokeFailed = true;
+      } else {
+        const size = fs.statSync(detail.path).size;
+        if (size < 10 * 1024) {
+          log('[smoke] FAILED: file suspiciously small (' + size + ' B)');
+          smokeFailed = true;
+        } else {
+          const head = await (async () => {
+            const fh = await fsp.open(detail.path, 'r');
+            try {
+              const b = Buffer.alloc(Math.min(2 * 1024 * 1024, size));
+              const { bytesRead } = await fh.read(b, 0, b.length, 0);
+              return b.subarray(0, bytesRead);
+            } finally { await fh.close().catch(() => {}); }
+          })();
+          const webm = checkWebM(head);
+          if (!webm.valid || !webm.hasCluster) {
+            log('[smoke] FAILED: not a structurally valid WebM:', webm.reason);
+            smokeFailed = true;
+          }
+          if (!(detail.durationMs >= 2000 && detail.durationMs <= 12000)) {
+            log('[smoke] FAILED: duration out of tolerance:', detail.durationMs, 'ms');
+            smokeFailed = true;
+          }
+          const listing = await listRecordings();
+          const entry = listing.find((li) => li.id === detail.id) || listing.find((li) => li.fileName === detail.fileName);
+          if (!entry) {
+            log('[smoke] FAILED: no library entry for the saved recording');
+            smokeFailed = true;
+          }
+          log('[smoke] file:', exists, '| size:', size, '| webm ok:', webm.valid,
+            '| duration:', detail.durationMs, 'ms | library entry:', !!entry);
+        }
+        // clean up the test artifact (own recording only)
+        try {
+          await fsp.rm(detail.path, { force: true });
+          if (detail.id) {
+            const p = resolveLibId(detail.id);
+            if (p && p === detail.path) { libRemove(p); revokeLibPath(p); }
+          }
+        } catch { /* cleanup is best-effort */ }
+      }
     }
   } catch (e) {
     log('[smoke] FAILED:', e && (e.stack || e.message));
+    smokeFailed = true;
   }
-  /* Quit gracefully so before-quit runs (tray cleanup); hard fallback in
-     case app.quit() is ever blocked — a CI run must always terminate. */
+  /* Quit gracefully so before-quit runs (tray cleanup). The fallback uses the
+     collected exit code — failure must NEVER be masked by exit 0. */
+  process.exitCode = smokeFailed ? 1 : 0;
+  log('[smoke] result:', smokeFailed ? 'FAIL (exit 1)' : 'PASS (exit 0)');
   setTimeout(() => app.quit(), 500);
-  setTimeout(() => app.exit(0), 3000);
+  setTimeout(() => app.exit(process.exitCode || 0), 3000);
 }
 
 /* ---------------- Lifecycle ---------------- */
@@ -979,6 +1590,39 @@ if (!gotLock) {
 
   app.whenReady().then(() => {
     ensureDirs();
+
+    /* main-process-owned security surface (P0) */
+    guard = createGuard({ trustedUrlPrefixes: [trustedUrlPrefix()], logger: (m, ...a) => log('guard', m, ...a) });
+    recRegistry = createRegistry({
+      makeTempTarget: (id) => path.join(tmpDir, `rec-${id}.webm`),
+      onEvent: (kind, session, prev) => {
+        if (kind === 'state' || kind === 'created') {
+          /* manifest updates on transitions are handled at the call sites;
+             this hook only feeds the (phase C) recovery telemetry */
+        }
+      }
+    });
+    manifestStore = createManifestStore({ dir: path.join(tmpDir, 'manifests') });
+    shareLauncher = createShareLauncher({
+      listApps: () => shareAppsCache.apps || [],
+      resolveApp: (appId) => {
+        const apps = shareAppsCache.apps || [];
+        return apps.find((a) => a.id === appId && a.exe && isPlausibleExecutable(a.exe)) || null;
+      },
+      recordingPath: (recordingId) => {
+        const p = resolveLibId(recordingId);
+        if (!p) return null;
+        if (!isInsideDir(p, saveDir) || path.dirname(p) !== saveDir) return null;
+        if (!/\.webm$/i.test(p)) return null;
+        return p;
+      },
+      spawn
+    });
+    rebuildLibIdIndex();
+
+    /* Player media server: rekzora-video://<libraryId>/video */
+    setupPlaybackProtocol();
+
     /* One-time migration: existing installs get the new light default */
     if (!settings.get('themeMigrated')) {
       settings.set({ theme: 'light', themeMigrated: true });
@@ -995,6 +1639,9 @@ if (!gotLock) {
     tray.on('click', () => showMainWindow());
 
     registerHotkeys();
+
+    // warm the share-detection cache so launches resolve instantly
+    detectShareApps().catch(() => {});
 
     // Headless self-test: REKZORA_SMOKE=1 records 3s of the primary screen,
     // verifies the file, prints the result and quits.
