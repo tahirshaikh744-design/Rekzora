@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+debug/
+
+# Local runtime logs / test artifacts
+logs/
+smoke-test.log
+smoke-test.err
+*.log
+*.err
+
+# Vendored toolchain (local convenience only - install Node.js like everyone else)
+tools/
+
+# Environment / secrets (code-signing keys must never be committed)
+.env
+.env.*
+.csc/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.vs/
+.vscode/
+*.user

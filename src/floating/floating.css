@@ -1,0 +1,65 @@
+html, body {
+  margin: 0; padding: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: 'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;
+  user-select: none;
+  cursor: default;
+}
+
+#bar {
+  position: fixed;
+  left: 0; top: 0; right: 0; bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px 0 14px;
+  border-radius: 32px;
+  background: rgba(22, 22, 26, 0.88);
+  backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  -webkit-app-region: drag;
+}
+
+.dot-wrap { width: 12px; display: grid; place-items: center; }
+.dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: #ff453a;
+  animation: blink 1.4s ease infinite;
+}
+.dot.paused { background: #ffd60a; animation: none; }
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+.time {
+  flex: 1;
+  margin-left: 6px;
+  color: #f5f5f7;
+  font-family: 'Cascadia Mono', 'SF Mono', ui-monospace, Consolas, monospace;
+  font-size: 15px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 1px;
+}
+
+.fb {
+  -webkit-app-region: no-drag;
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 13px;
+  display: grid; place-items: center;
+  cursor: pointer;
+  transition: background .15s, transform .12s;
+}
+.fb:hover { background: rgba(255, 255, 255, 0.22); }
+.fb:active { transform: scale(0.9); }
+.fb.stop {
+  background: #ff453a;
+  font-size: 11px;
+}
+.fb.stop:hover { background: #ff5f57; }

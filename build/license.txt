@@ -1,0 +1,172 @@
+REKZORA — PRIVACY POLICY & END-USER LICENSE AGREEMENT
+Copyright (c) 2026 NEURON TS LABS. Author: Mohd Tahir Shaikh.
+
+Last updated: November 2026
+
+========================================================================
+1. PRIVACY POLICY
+========================================================================
+
+1.1 THE SHORT VERSION
+Rekzora is an offline-first application. We collect nothing. We track
+nobody. We phone no home. There is no account, no login, no cloud, no
+analytics and no advertising of any kind inside Rekzora.
+
+1.2 WHAT DATA REKZORA STORES, AND WHERE
+All user data produced by Rekzora stays on YOUR computer, in two places:
+
+  a) Your Recordings
+     Video files (WebM) you create are saved to the folder YOU choose
+     (by default the "Rekzora Recordings" folder in your Videos library).
+     We never upload, transmit or copy these files anywhere. Only you,
+     or apps you explicitly drop/share them into, can move them off
+     your machine.
+
+  b) Application Preferences
+     A small local settings file and a recordings index are stored in
+     your own Windows AppData profile folder
+     (C:\Users\<you>\AppData\Roaming\rekzora-screen-recorder\).
+     This holds your theme, frame rate, quality, hotkeys, save folder
+     and thumbnail metadata so the app remembers your setup. It never
+     leaves your device unless Windows Backup or you copy it.
+
+1.3 WHAT WE DO NOT COLLECT
+ - No personal information (name, address, contact details)
+ - No audio, video or screen content (it is never streamed, uploaded,
+   or processed outside your device memory)
+ - No crash dumps are transmitted automatically
+ - No telemetry, analytics, statistics, or usage tracking of any kind
+ - No cookies, fingerprinting, or advertising identifiers
+ - No purchase/billing data (Rekzora has no paid accounts)
+
+1.4 NETWORK ACCESS
+Rekzora does not create or require network connections as part of normal
+operation. The only networking that can ever occur is initiated and
+performed BY YOU, outside Rekzora's code — for example when you click a
+link that opens your browser, or when you choose to transmit a video
+using YOUR installed sharing applications (Google Quick Share, SHAREit,
+LocalSend, Send Anywhere, Xender, Telegram, etc.). When you use those
+applications you are subject to THEIR privacy policies, not ours.
+
+1.5 MICROPHONE, CAMERA AND SCREEN
+Rekzora can only use your microphone, webcam and screen-faces-captured
+content while a recording is actively running, and only when you (or
+your recorded hotkey) started it. Windows may display recording
+indicators during that time. Recordings are written straight to disk;
+Rekzora does not keep hidden copies.
+
+1.6 CHILDREN
+Rekzora is a generic desktop utility and is not directed at children
+under 13. Because no data is collected, no data about children exists.
+
+1.7 YOUR RIGHTS & DATA DELETION
+Because all data already lives on your own device, you are always in
+full control:
+ - Uninstalling Rekzora (or deleting the portable ZIP/exe) removes the
+   program. Delete the recordings folder to erase recordings.
+ - "Delete recordings from disk" inside Rekzora permanently erases the
+   selected videos from your drive (no recycle bin).
+ - Ticking "Delete my Rekzora data when uninstalling" (where shown) also
+   removes preferences from AppData.
+
+1.8 CHANGES TO THIS POLICY
+If this policy ever changes (e.g. an optional update checker is added),
+changes will be listed here and flagged inside the app before any new
+behavior activates. No change will silently start collecting data.
+
+1.9 CONTACT
+Privacy questions, security reports and takedown requests:
+  NEURON TS LABS
+  Attn: Mohd Tahir Shaikh
+  Email: tahirshaikh744@gmail.com
+  https://github.com/tahirshaikh744-design/rekzora/issues
+
+We aim to answer privacy/security email within 15 business days.
+
+========================================================================
+2. END-USER LICENSE AGREEMENT (EULA)
+========================================================================
+
+IMPORTANT — READ CAREFULLY. By clicking "I Agree" (or by installing,
+copying or otherwise using Rekzora), you accept ALL of the terms below.
+If you do not agree, click "I Disagree" and do not install or use the
+software.
+
+2.1 GRANT OF LICENSE
+NEURON TS LABS ("Licensor") grants you ("Licensee"), free of charge,
+a perpetual, worldwide, non-exclusive license to install and use
+Rekzora ("the Software") on any number of devices that you own or
+control, for any lawful personal or commercial purpose.
+
+2.2 OPEN SOURCE & SOURCE AVAILABILITY
+Rekzora is distributed as open-source software. The source code is
+publicly available and governed by the MIT License (see LICENSE in the
+project repository). This EULA governs the compiled, signed EXE builds
+that you obtain from NEURON TS LABS; the MIT License governs the code
+itself. The two documents are complementary, and the most specific
+condition wins for each part you use.
+
+2.3 COPYRIGHT
+The Software, its name, and its design are Copyright (c) 2026 NEURON
+TS LABS. All rights not expressly granted are reserved.
+
+2.4 WHAT YOU MAY DO
+ - Use the Software without limitation, on any PC you control
+ - Copy and redistribute unmodified builds freely
+ - Study, modify, and build from the source code under MIT terms
+ - Use the Software in your business, education, or content creation
+
+2.5 WHAT YOU MAY NOT DO
+ - Present the Software as your own product, remove the
+   "NEURON TS LABS" branding/metadata from UI or binary resources, or
+   use the "Rekzora" name or NEURON TS LABS branding in a way that
+   suggests official endorsement of your product
+ - Use the Software to record content in violation of any law, contract,
+   or the privacy rights of others (including law-enforcement
+   restrictions on intercepting calls or protected communications)
+ - Use the Software to attack, harass, stalk, or violate the rights of
+   any person, or to process content you know to be unlawful
+
+2.6 SECURITY RESPONSIBILITY
+You acknowledge that screen recording is a powerful capability. You
+agree you are responsible for the content you record, where you store
+it, and with whom you share it. NEURON TS LABS has no access to, and
+no control over, recordings created with the Software.
+
+2.7 NO WARRANTY
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NON-INFRINGEMENT. You are responsible for choosing and testing the
+Software for your own needs (for example, do not rely on it for
+mission-critical capture).
+
+2.8 LIMITATION OF LIABILITY
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, IN NO EVENT SHALL NEURON TS
+LABS OR ITS AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, CONSEQUENTIAL OR PUNITIVE DAMAGES, OR ANY LOSS OF DATA,
+RECORDINGS, PROFITS, REVENUE OR GOODWILL ARISING OUT OF THE USE OR
+INABILITY TO USE THE SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGES.
+
+2.9 TERMINATION
+This agreement is effective until terminated. It terminates
+automatically if you breach it. Sections 2.7 and 2.8 survive
+termination. You may stop using Rekzora at any time; the license to use
+it here ends only if you violate these terms.
+
+2.10 SPAM / CAN-SPAM / CONTACT LIMITS
+We will never email you, because we never collect your email. If you
+email us, we will use your address only to reply to your question.
+
+2.11 EXPORT
+You agree to comply with applicable import/export laws when moving or
+using the Software across borders.
+
+2.12 CONTACT
+  NEURON TS LABS — Mohd Tahir Shaikh
+  tahirshaikh744@gmail.com
+  https://github.com/tahirshaikh744-design/rekzora
+
+THANK YOU FOR USING REKZORA.
+Record beautifully. Stay private. — NEURON TS LABS

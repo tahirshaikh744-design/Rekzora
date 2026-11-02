@@ -1,0 +1,81 @@
+{
+  "name": "rekzora-screen-recorder",
+  "productName": "Rekzora",
+  "version": "1.0.0",
+  "description": "A beautiful, minimal, open-source screen recorder for Windows. By NEURON TS LABS.",
+  "main": "main.js",
+  "author": {
+    "name": "NEURON TS LABS",
+    "email": "tahirshaikh744@gmail.com"
+  },
+  "contributors": [
+    {
+      "name": "Mohd Tahir Shaikh",
+      "email": "tahirshaikh744@gmail.com"
+    }
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/tahirshaikh744-design/rekzora#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tahirshaikh744-design/rekzora.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tahirshaikh744-design/rekzora/issues",
+    "email": "tahirshaikh744@gmail.com"
+  },
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "dist": "electron-builder --win nsis portable",
+    "dist:installer": "electron-builder --win nsis",
+    "dist:portable": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^38.0.0",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "com.neurontslabs.rekzora",
+    "productName": "Rekzora",
+    "copyright": "Copyright © 2026 NEURON TS LABS — Developed by Mohd Tahir Shaikh",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "assets/**/*"
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "icon": "assets/icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "legalTrademarks": "Rekzora is a trademark of NEURON TS LABS"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "license": "build/license.rtf",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Rekzora",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "uninstallDisplayName": "Rekzora — Screen Recorder (NEURON TS LABS)",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true,
+      "artifactName": "Rekzora-Setup-${version}.exe",
+      "include": "build/installer.nsh"
+    },
+    "portable": {
+      "artifactName": "Rekzora-Portable-${version}.exe",
+      "requestExecutionLevel": "user"
+    }
+  }
+}
