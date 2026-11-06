@@ -117,6 +117,23 @@ Fixes are committed in order; each phase lands with its regression tests. Nothin
 
 Full Windows hardware matrix (BT/USB mics, multi-monitor rigs, clean-VM installer runs, sleep/suspend paths) cannot execute in this environment; the test report marks such entries explicitly as *not executed (environment)* — never as passed.
 
+## 5. Implemented-fix ledger (final state of this repair cycle)
+
+| Improvement | Commit | Verification |
+|---|---|---|
+| Renderer-owned `tempPath`/exe paths removed; main-owned crypto session ids; share `{appId, recordingId}` registry; opaque library ids + `rekzora-video://` playback; IPC guard + role-scoped preload; `sandbox:true`; navigation/window guards; smoke exit honesty | `1f1ecb9` | 48 tests + live smoke PASS |
+| Recording reliability: idempotent capture cleanup, late-promise track stop, AudioContext resume/verify, bounded 16-chunk pump with honest stop, quit handshake, crash-recovery scan + channels + banner | `7e537fb` | unit + live smoke PASS |
+| Electron 38→45.2.3; deny-by-default permission handlers; tightened CSP; playback probe in smoke | `160b5bf` | binary check + smoke `playback ok` |
+| Typed settings schema; atomic store with `.bak` recovery; save-dir write-test provisioning; thumb bounds | `e31590a` | 20 new tests; live migration preserved user values |
+| README truthfulness: Auto 2560 cap, Ultra bitrate scaling, crash-safe wording, node 22+, honest installer claims | `a60b196` | doc review |
+| Zero-frame capture: CREATED finish no longer crashes; renderer shows named reason; smoke bounded at 45 s | `98bffed` | regression test + live smoke PASS after reproducing the hang |
+| CI: tag↔version gate, `npm ci`, tests+smoke before build, `--publish never` + explicit release step, SHA256SUMS, SHA-pinned actions | `ac43300` | workflow review + SHA verification |
+| Docs: test report (NOT EXECUTED ledger) + release checklist | this commit | files present |
+
+Residual, deliberately unshipped: items in `docs/REKZORA_TEST_REPORT.md` §9
+(hardware-matrix validation) and §10 (publish gate needs owner
+authorization).
+
 ---
 
-*Updated as phases land — see §5 (created after Phase B) for the implemented-fix ledger.*
+*Updated as phases land — this §5 closes the ledger for the v1.1 cycle.*

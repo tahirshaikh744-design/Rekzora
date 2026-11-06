@@ -26,10 +26,16 @@ your machine.\par
 b) Application Preferences\par
 A small local settings file and a recordings index are stored in\par
 your own Windows AppData profile folder\par
-(C:\\Users\\<you>\\AppData\\Roaming\\rekzora-screen-recorder\\).\par
+(C:\\Users\\<you>\\AppData\\Roaming\\Rekzora\\).\par
 This holds your theme, frame rate, quality, hotkeys, save folder\par
 and thumbnail metadata so the app remembers your setup. It never\par
 leaves your device unless Windows Backup or you copy it.\par
+Interrupted recordings are additionally kept as temporary files in\par
+the same folder tree (Rekzora\\recordings-tmp) together with a small\par
+manifest, so Rekzora can offer them to you on the next launch\par
+(recovery). They stay on your device until you keep or delete them,\par
+or until the app finds an empty temp file with no matching data\par
+(then it cleans that pair quietly).\par
 \par
 {\b 1.3 WHAT WE DO NOT COLLECT}\par
 - No personal information (name, address, contact details)\par

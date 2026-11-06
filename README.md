@@ -231,10 +231,22 @@ Everything above can be deleted to reset Rekzora to day one (no registry keys ar
 
 ## 🌐 Releases & CI
 
-Every git tag `v*.*.*` (e.g. `v1.0.0`) pushed to GitHub triggers
-[`.github/workflows/release.yml`](.github/workflows/release.yml), which builds **Rekzora-Setup** and
-**Rekzora-Portable** and attaches them to a GitHub Release automatically. The release checklist lives
-in [`RELEASE.md`](RELEASE.md).
+Every git tag `v*.*.*` (e.g. `v1.1.0`) pushed to GitHub triggers
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which then
+
+1. **refuses to run** if the tag doesn't match `package.json`'s version,
+2. installs dependencies reproducibly (`npm ci`),
+3. runs the **regression suite** (70 tests) and the **headless smoke test**
+   (a real 3-second recording through the real app; its exit code gates the build),
+4. builds **Setup + Portable** *without* auto-publishing,
+5. writes a **SHA-256 checksums file** for the exe artifacts (checkbox-based verification
+   refuses to release with a missing artifact), and
+6. creates the GitHub Release with the notes from `RELEASE-NOTES.md`, attaching
+   both exes + `SHA256SUMS.txt` — nothing is published until tests, smoke, the
+   version gate and the checksums have all passed.
+
+Both actions are **pinned to exact commit SHAs** (no floating `@v4`-style tags). The release
+checklist lives in [`RELEASE.md`](RELEASE.md).
 
 To publish a release from this machine:
 
