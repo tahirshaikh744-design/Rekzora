@@ -18,6 +18,7 @@ cd /d "%~dp0"
 
 set "F_CODE=0"
 set "F_WHY="
+set "HINT="
 
 rem ---------- branded header: pure batch, instant, no processes ----------
 color 0B
@@ -106,6 +107,7 @@ if "%NEED_CI%"=="1" (
   if errorlevel 1 (
     set "F_CODE=20"
     set "F_WHY=npm ci failed - see the npm output above"
+    set "HINT=the full npm log file is in %LOCALAPPDATA%\npm-cache\_logs - newest file there. usual causes: no internet, or another program (VS Code / Explorer / a running Rekzora) holding files open - close them and run build.cmd again"
     goto :finale
   )
 ) else (
@@ -118,12 +120,14 @@ if not exist "node_modules\electron\dist\electron.exe" (
   if errorlevel 1 (
     set "F_CODE=21"
     set "F_WHY=electron runtime install failed - see output above"
+    set "HINT=the electron binary download needs internet access - check firewall / VPN and run build.cmd again"
     goto :finale
   )
 )
 if not exist "node_modules\electron\dist\electron.exe" (
   set "F_CODE=22"
   set "F_WHY=node_modules\electron\dist\electron.exe is still missing after install"
+  set "HINT=the electron binary download needs internet access - check firewall / VPN and run build.cmd again"
   goto :finale
 )
 echo     electron runtime binary present - ok
@@ -214,6 +218,7 @@ if "%F_CODE%"=="0" (
   echo   ██████╗  BUILD FAILED - exit code %F_CODE%  ██████╗
   color 0E
   echo   Reason: %F_WHY%
+  if not "%HINT%"=="" echo   Hint:   %HINT%
   echo   Scroll up to the failing step to see the detailed output.
   color 0F
 )
