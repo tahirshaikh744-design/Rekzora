@@ -66,6 +66,22 @@ test('state machine: CREATED → RECORDING on first chunk; completed sessions ar
   assert.strictEqual(session.bytes, 8);
 });
 
+test('zero-chunk finish: CREATED → FAILED is legal; forget() then applies; later finish rejected', () => {
+  /* mirrors main.js: a source that never produced frames ends CREATED with
+     0 chunks/bytes — the honest handling is a clean FAILED, not a crash */
+  const r = fakeRegistry();
+  const s = r.create(OWNER);
+  assert.strictEqual(s.chunks, 0);
+  assert.strictEqual(s.bytes, 0);
+  /* authorizeFinish itself is permissive pre-check until main's branch acts */
+  r.authorizeFinish(s.recordingId, OWNER);
+  assert.doesNotThrow(() => r.transit(s, STATE.FAILED), 'CREATED → FAILED must be legal for zero-frame takes');
+  assert.doesNotThrow(() => r.forget(s.recordingId), 'terminal session can be forgotten');
+  assert.throws(() => r.authorizeFinish(s.recordingId, OWNER), /no such recording session/, 'forgotten session rejects further activity');
+  const s2 = r.create(OWNER);
+  assert.throws(() => r.forget(s2.recordingId), /cannot forget a live session/, 'live sessions cannot be forgotten');
+});
+
 test('double finalize is rejected; chunk during FINALIZING/after COMPLETED rejected', () => {
   const r = fakeRegistry();
   const s = r.create(OWNER);

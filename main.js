@@ -1373,6 +1373,23 @@ function registerIpc() {
       thumb: payload.meta?.thumb
     });
     const session = recRegistry.authorizeFinish(payload.recordingId, senderInfo);
+    /* (v1.1 reliability) the capture source never produced a single frame —
+       e.g. a Protected Content window or a transient DXGI duplicator failure.
+       There is no video to finalize: fail honestly with a named reason, free
+       the state machine (CREATED→FAILED) and clean any empty temp artifacts.
+       This is NOT the disk-error path: no data ever existed to lose. */
+    if (session.state === STATE.CREATED && session.chunks === 0 && session.bytes === 0) {
+      recRegistry.transit(session, STATE.FAILED);
+      recRegistry.forget(session.recordingId);
+      try { await manifestStore.remove(session.recordingId); } catch { /* notified via recovery scan otherwise */ }
+      try {
+        if (session.tempTarget && fs.existsSync(session.tempTarget)) {
+          await fsp.rm(session.tempTarget, { force: true });
+        }
+      } catch { /* best-effort */ }
+      log('recording finished with zero captured frames — marking FAILED');
+      throw new Error('No video frames were captured from the selected source (the app may be protected content or the display capture engine failed). Recording not saved.');
+    }
     recRegistry.transit(session, STATE.STOPPING);
     try {
       await manifestStore.saveNow(session.recordingId, {
@@ -1662,10 +1679,14 @@ async function runSmokeTest() {
     await new Promise(r => setTimeout(r, 2500));
     const wc = mainWin.webContents;
     log('[smoke] dispatching to renderer');
-    const res = await wc.executeJavaScript(`(new Promise((resolve) => {
+    /* the renderer flow must resolve; a hung or broken flow is a FAIL,
+       never an unbounded hang holding the app open (v1.1 honesty gate) */
+    const res = await Promise.race([
+      wc.executeJavaScript(`(new Promise((resolve) => {
       const P = (m) => { try { window.rekzora.log('[smkdbg] ' + m); } catch (_) {} };
       P('listener wired');
       window.addEventListener('rekzora:recorder-saved', (e) => { P('saved event arrived'); resolve({ ok: true, detail: e.detail }); }, { once: true });
+      window.addEventListener('rekzora:recorder-error', (e) => { P('recorder error event: ' + JSON.stringify(e.detail)); resolve({ ok: false, why: 'recorder failed: ' + (e.detail && e.detail.message) }); }, { once: true });
       (async () => {
         P('querying sources');
         const srcs = await window.rekzora.sources.list();
@@ -1686,7 +1707,9 @@ async function runSmokeTest() {
         P('start() resolved');
         setTimeout(() => { P('stopping now'); window.RekzoraRecorder.stop(); }, 3000);
       })().catch((e) => { P('inner error: ' + String(e && e.message || e)); resolve({ ok: false, why: String(e && e.message || e) }); });
-    }))`, true);
+    }))`, true),
+      new Promise((resolve) => setTimeout(() => resolve({ ok: false, why: 'smoke flow did not resolve within 45 s — timeout' }), 45000))
+    ]);
     log('[smoke] result:', JSON.stringify(res));
 
     const detail = res && res.detail;

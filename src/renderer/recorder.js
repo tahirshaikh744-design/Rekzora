@@ -683,8 +683,16 @@
       } catch (e) {
         err('finish failed', e && e.message);
         if (s.recordingId) await rekzora.rec.discard(s.recordingId).catch(() => {});
+        /* Electron wraps the main-process error; strip the plumbing noise so
+           the message the user sees is the actual reason (e.g. "No video
+           frames were captured…") */
+        const reason = typeof (e && e.message) === 'string'
+          ? e.message.replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '')
+          : '';
         window.dispatchEvent(new CustomEvent('rekzora:recorder-error', {
-          detail: { message: 'Could not save recording — the take was not finalized. Check disk space and permissions.' }
+          detail: { message: reason.includes('No video frames') || reason.includes('protected content')
+            ? reason
+            : 'Could not save recording —' + (reason ? ' ' + reason : ' the take was not finalized. Check disk space and permissions.') }
         }));
       }
       rec.session = null;
