@@ -251,7 +251,11 @@
 
   async function saveSettings(patch) {
     Object.assign(settings, patch);
-    settings = await rekzora.settings.set(patch);
+    const res = await rekzora.settings.set(patch);
+    /* the main process is authoritative: it can refuse fields (schema) or
+       an unwritable saveDir — surface refusals instead of failing silently */
+    if (res && res.error) toast(res.error, { level: 'warn' });
+    settings = res;
     applySettings();
   }
   const saveSettingsDebounced = saveSettings;
@@ -1060,6 +1064,10 @@
   $('#lib-open-folder').onclick = () => rekzora.recordings.openFolder();
   $('#lib-change-folder').onclick = async () => {
     const dir = await rekzora.recordings.pickFolder();
+    if (dir && typeof dir === 'object' && dir.error) {
+      toast(dir.error, { level: 'warn' });
+      return;
+    }
     if (dir) {
       settings.saveDir = dir;
       $('#lib-folder').textContent = dir;
@@ -1151,6 +1159,10 @@
   };
   $('#set-folder-change') && ($('#set-folder-change').onclick = async () => {
     const dir = await rekzora.recordings.pickFolder();
+    if (dir && typeof dir === 'object' && dir.error) {
+      toast(dir.error, { level: 'warn' });
+      return;
+    }
     if (dir) { saveSettings({ saveDir: dir }); toast('Recordings folder updated.'); }
   });
 

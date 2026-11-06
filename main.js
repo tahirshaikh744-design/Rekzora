@@ -27,6 +27,8 @@ const { createShareLauncher, validateLibraryId, isPlausibleExecutable, ShareErro
 const { checkWebM } = require('./lib/webm-check');
 const { createManifestStore } = require('./lib/manifest');
 const { ROLES, GuardError, createGuard, ROLE_CHANNELS } = require('./lib/ipc-guard');
+const { createJsonStore } = require('./lib/json-store');
+const { DEFAULT_SETTINGS, validatePatch, sanitizeStored } = require('./lib/settings-schema');
 
 /* The player loads recordings through this custom, main-owned protocol:
    rekzora-video://<libraryId>/v.webm → resolved via the library index, so a
@@ -47,34 +49,27 @@ const APP_VERSION = app.getVersion();
    under one taskbar entry and shows the Rekzora icon in notifications. */
 app.setAppUserModelId('com.neurontslabs.rekzora');
 
-/* ---------------- Settings store (JSON, no deps) ---------------- */
-class Store {
-  constructor(file, defaults) {
-    this.file = file;
-    this.defaults = defaults;
-    this.data = Object.assign({}, defaults, this._read());
+/* ---------------- Settings store (atomic JSON, no deps) ----------------
+   Persistence rules (v1.1 Phase E): atomic temp+rename writes, .bak
+   rotation with first-write seeding, corrupt-primary recovery from the
+   backup (never a silent reset), schema-validated settings via
+   DEFAULT_SETTINGS/sanitizeStored so a broken renderer cannot poison
+   the stored values. Library metadata gets the same durability with a
+   thumb-size clamp as its sanitizer. */
+function sanitizeLibDb(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out = {};
+  for (const [p, meta] of Object.entries(raw)) {
+    if (!meta || typeof meta !== 'object') continue;         // drop corrupt entries, keep the rest
+    if (typeof meta.thumb === 'string' && !(meta.thumb.startsWith('data:image/jpeg;base64,') && meta.thumb.length <= 512 * 1024)) {
+      meta.thumb = null;                                     // never store unbounded blobs in the db
+    }
+    out[p] = meta;
   }
-  _read() {
-    try { return JSON.parse(fs.readFileSync(this.file, 'utf8')); }
-    catch { return {}; }
-  }
-  get(key) { return this.data[key]; }
-  set(patch) {
-    Object.assign(this.data, patch || {});
-    this._write();
-    return this.data;
-  }
-  remove(key) {
-    delete this.data[key];
-    this._write();
-  }
-  _write() {
-    try {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      fs.writeFileSync(this.file, JSON.stringify(this.data, null, 2), 'utf8');
-    } catch (e) { console.error('[store] write failed', e); }
-  }
+  return out;
 }
+
+function storeError(m) { console.error('[store]', m); log(m); }
 
 function getDefaultSaveDir() {
   try {
@@ -85,45 +80,54 @@ function getDefaultSaveDir() {
   return path.join(app.getPath('userData'), 'Recordings');
 }
 
-const settings = new Store(
-  path.join(app.getPath('userData'), 'settings.json'),
-  {
-    theme: 'light',
-    themeMigrated: false,
-    mode: 'fullscreen',           // fullscreen | window | region
-    fps: 30,                      // 24 | 30 | 60
-    quality: 'high',              // low | medium | high | ultra
-    resolution: 'auto',           // auto | 240p | 360p | 480p | 720p | 1080p | 1440p | 2160p
-    countdown: 3,                 // 0 | 3 | 5
-    mic: true,
-    sysAudio: true,
-    webcam: false,
-    saveDir: null,                // resolved at startup
-    hotkeyToggle: 'F9',
-    hotkeyPause: 'F10',
-    closeToTray: true,
-    eulaAccepted: false           // first-run Privacy Policy / EULA consent
+const settings = createJsonStore({
+  file: path.join(app.getPath('userData'), 'settings.json'),
+  defaults: DEFAULT_SETTINGS,
+  sanitize: sanitizeStored,
+  onError: storeError
+});
+
+/* Save-dir provisioning (v1.1 Phase E): a directory that only accepts the
+   mkdir must not be trusted to hold recordings — probe with a real file. */
+function provisionSaveDir(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const probe = path.join(dir, `.rekzora-write-test-${process.pid}`);
+    fs.writeFileSync(probe, '.', 'utf8');        // throws on read-only/network-restricted dirs
+    fs.unlinkSync(probe);
+    return { ok: true };
+  } catch (e) {
+    log('save dir not usable:', dir, e && e.message);
+    return { ok: false, reason: e && e.message };
   }
-);
+}
 
 /* Metadata database — lives in AppData so recordings folders stay clean
    (previously we dropped a `.json` sidecar next to every video). */
-const libDb = new Store(
-  path.join(app.getPath('userData'), 'library.json'),
-  {}
-);
+const libDb = createJsonStore({
+  file: path.join(app.getPath('userData'), 'library.json'),
+  defaults: {},
+  sanitize: sanitizeLibDb,
+  onError: storeError
+});
 function libSet(p, meta) { libDb.set({ [p]: meta }); }
 function libGet(p) { return libDb.data[p] || null; }
 function libRemove(p) { libDb.remove(p); }
 
 function cleanLibMeta(raw) {
   if (!raw) return null;
+  /* (Phase E) thumbs are 512 KB-capped jpeg data URLs from our own capture
+     pipeline — a corrupt or hostile raw source (old sidecars, tampered
+     library.json) yields null, never an unbounded blob */
+  const thumbOk = typeof raw.thumb === 'string'
+    && raw.thumb.startsWith('data:image/jpeg;base64,')
+    && raw.thumb.length <= 512 * 1024;
   return {
     title: raw.title || null,
     fileName: raw.fileName || null,
     created: raw.created || null,
     durationMs: raw.durationMs || 0,
-    thumb: raw.thumb || null,
+    thumb: thumbOk ? raw.thumb : null,
     type: raw.type || 'screen',
     sourceName: raw.sourceName || null,
     fps: raw.fps || null,
@@ -252,12 +256,25 @@ function trustedUrlPrefix() {
 }
 
 function ensureDirs() {
-  saveDir = settings.get('saveDir') || getDefaultSaveDir();
+  const configured = settings.get('saveDir');
+  const usable = configured ? provisionSaveDir(configured).ok : false;
+  if (configured && !usable) {
+    /* never record into a dead folder for this run — use the default, log
+       and notify, but KEEP the user's stored choice for next time */
+    log('configured recordings folder is not writable right now — using the default for this run');
+    sendToMain('recordings:changed', { saveDirFallback: true });
+  }
+  saveDir = usable ? configured : getDefaultSaveDir();
   tmpDir = path.join(app.getPath('userData'), 'recordings-tmp');
   for (const d of [saveDir, tmpDir]) {
     try { fs.mkdirSync(d, { recursive: true }); } catch (e) { console.error('[dirs]', e); }
   }
-  settings.set({ saveDir });
+  /* Persist the resolved default only for a genuine first run (fresh
+     settings.json) so the UI can show it; a fallback must not overwrite
+     the user's stored choice. */
+  if (!configured && saveDir && settings.get('saveDir') !== saveDir) {
+    settings.set({ saveDir });
+  }
 }
 
 function dateStamp(d = new Date()) {
@@ -1231,16 +1248,26 @@ function registerIpc() {
   /* settings */
   H('settings:get', () => ({ ...settings.data, appVersion: APP_VERSION }));
   H('settings:set', ([patch]) => {
-    const clean = {};
-    const allowed = ['theme', 'themeMigrated', 'mode', 'fps', 'quality', 'resolution', 'countdown', 'mic', 'sysAudio', 'webcam',
-      'saveDir', 'hotkeyToggle', 'hotkeyPause', 'closeToTray', 'eulaAccepted'];
-    for (const k of allowed) if (k in (patch || {})) clean[k] = patch[k];
-    if (clean.saveDir) {
-      clean.saveDir = path.resolve(clean.saveDir);
-      try { fs.mkdirSync(clean.saveDir, { recursive: true }); } catch {}
+    /* (Phase E) schema-validated, coerced, unknown keys dropped — the
+       returned object is always the authoritative full settings */
+    const check = validatePatch(patch);
+    if (check.errors.length) log('settings:set rejected fields:', check.errors.join(' | '));
+    if (check.ok && check.data) {
+      if (check.data.saveDir !== undefined) {
+        /* a non-writable folder must never be persisted as the recordings
+           home — recordings would go there and then fail to finalize */
+        const dir = check.data.saveDir && check.data.saveDir.length
+          ? path.resolve(check.data.saveDir)
+          : null;
+        if (dir && !provisionSaveDir(dir).ok) {
+          log('saveDir rejected (not writable), keeping:', settings.get('saveDir'));
+          return { ...settings.data, appVersion: APP_VERSION, error: 'That folder is not writable — the recordings folder was not changed.' };
+        }
+        check.data.saveDir = dir;
+      }
+      settings.set(check.data);
+      if ('hotkeyToggle' in check.data || 'hotkeyPause' in check.data) registerHotkeys();
     }
-    settings.set(clean);
-    if (clean.hotkeyToggle !== undefined || clean.hotkeyPause !== undefined) registerHotkeys();
     return { ...settings.data, appVersion: APP_VERSION };
   });
 
@@ -1439,7 +1466,12 @@ function registerIpc() {
       properties: ['openDirectory', 'createDirectory']
     });
     if (res.canceled || !res.filePaths.length) return null;
-    settings.set({ saveDir: res.filePaths[0] });
+    const dir = path.resolve(res.filePaths[0]);
+    if (!provisionSaveDir(dir).ok) {
+      log('picked folder is not writable; keeping:', saveDir);
+      return { error: 'That folder is not writable — the recordings folder was not changed.' };
+    }
+    settings.set({ saveDir: dir });
     ensureDirs();
     return settings.get('saveDir');
   });
