@@ -760,11 +760,13 @@
         ? `<img src="${item.thumb}" alt="" draggable="false"/>`
         : '';
       const badges = [
+        item.recovered ? 'Recovered' : null,
+        item.partial ? 'Partial' : null,
         item.type === 'window' ? 'Window' : item.type === 'region' ? 'Region' : 'Full',
         item.fps ? item.fps + ' fps' : null,
         item.mic ? '🎙' : null,
         item.systemAudio ? '🔊' : null
-      ].filter(Boolean).map(b => `<span class="badge">${b}</span>`).join('');
+      ].filter(Boolean).map(b => `<span class="badge${b === 'Recovered' || b === 'Partial' ? ' badge-warn' : ''}">${b}</span>`).join('');
 
       card.innerHTML = `
         <div class="rec-thumb">${thumb}

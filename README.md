@@ -5,7 +5,7 @@ Clean, flat, translucent design with **native Windows-style title-bar buttons**,
 themes, and an always-on-top floating control bar. Everything is offline and free — no account,
 no cloud, no tracking, no watermark.
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-Windows-black)
+![Version](https://img.shields.io/badge/version-1.1.0-blue) ![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-Windows-black)
 
 > **Rekzora** by **NEURON TS LABS** — Mohd Tahir Shaikh · 📧 tahirshaikh744@gmail.com · 🌐 [github.com/tahirshaikh744-design](https://github.com/tahirshaikh744-design)
 
@@ -31,20 +31,20 @@ no cloud, no tracking, no watermark.
 - 🎙 **Microphone** — with noise suppression & auto gain
 - 🔊 **System audio** — Windows loopback (what you hear is what you get)
 - 📷 **Webcam overlay** — picture-in-picture bubble
-- 📐 **Resolution control** — Auto / 240p / 360p / 480p / 720p / 1080p / 1440p / 2160p
+- 📐 **Resolution control** — Auto / 240p / 360p / 480p / 720p / 1080p / 1440p / 2160p · presets scale *down* to the target's long edge (aspect kept, smaller sources are never upscaled); **Auto caps a 4K capture at the 2560-px long edge** so ultra-wide takes stay smooth and playable on ordinary hardware
 - ⏱ **Countdown** — 3s / 5s / none *with capture pre-arming — recording starts the instant it hits zero*
 - ⏸ **Pause / Resume** — media-quality pauses (no gaps in the timeline)
-- 💾 **Crash-safe** — video is streamed to disk every second; even a crash preserves your footage
+- 💾 **Crash-safe** — video is streamed to disk every second; if Rekzora is ever interrupted mid-recording, the take survives and a **Recovery banner** on the next launch offers to keep it into your Library or delete it — nothing hides in a temp folder
 
 ### Workflow
 - 🧮 **Global hotkeys** — `F9` start/stop, `F10` pause/resume (rebindable)
 - 🎛 **Floating bar** — always-on-top timer + controls; runs non-focusable so it never steals focus
-- 📚 **Library** — searchable, with live thumbnails, filters and metadata badges
+- 📚 **Library** — searchable, with live thumbnails, metadata badges (**Recovered**/Partial included, so interrupted takes are labeled honestly), and filters
 - ⋮ **Actions menu** — Play, Share, Rename, Show in folder, Copy path, Properties, Delete (left-click ⋮ or **right-click** a card)
 - 📤 **Share sheet** — detected sharing apps on your PC (Google Quick Share, SHAREit, LocalSend, Send Anywhere, Xender, Telegram), or any app via "Open with…" · **native drag-out**: drag a Library card (or a player video) straight into Quick Share / SHAREit / any app window to attach and send
 - 🔔 **Save toast** — every recording confirms with its title + full file path
 - ▶️ **In-app player** — play, rename, delete, reveal in Explorer
-- ⚙️ **Settings** — theme (dark/light), fps (24/30/60), quality (up to 24 Mbps "Ultra"), save folder, countdown, tray behavior
+- ⚙️ **Settings** — theme (dark/light), fps (24/30/60), quality presets that scale the video bitrate (**"Ultra" targets 24 Mbps at Full HD and scales with resolution, capped at a 42 Mbps ceiling** — it is a scaling slider, not a fixed number), save folder, countdown, tray behavior
 - 🖥 **Tray** — keep Rekzora in the system tray; recordings continue while the window is hidden
 - 🔋 **Suspend-aware** — automatically pauses if your PC goes to sleep
 
@@ -61,7 +61,7 @@ no cloud, no tracking, no watermark.
 |---|---|
 | **OS** | Windows 10 (build 1903+) or Windows 11, 64-bit |
 | **For ready-made installers** | nothing else — just download and run |
-| **For building from source** | [Git](https://git-scm.com/downloads) and [Node.js 18+](https://nodejs.org/) (LTS recommended) |
+| **For building from source** | [Git](https://git-scm.com/downloads) and [Node.js 22+](https://nodejs.org/) (the v22 LTS is recommended) |
 | **Disk** | ~300 MB free for the app; more for your recordings |
 
 ---
@@ -80,8 +80,10 @@ https://github.com/tahirshaikh744-design/rekzora/releases/latest
 
 | File | Best for |
 |---|---|
-| `Rekzora-Setup-1.0.0.exe` (≈ 98 MB) | **Installed app** — Start-menu + desktop shortcuts,Updates in place. The recommended choice. |
-| `Rekzora-Portable-1.0.0.exe` (≈ 90 MB) | **No install at all** — one file you can keep on a USB stick or any folder |
+| `Rekzora-Setup-1.1.0.exe` (~100 MB) | **Installed app** — Start-menu + desktop shortcuts; reinstalling over an older version keeps your recordings and settings. The recommended choice. |
+| `Rekzora-Portable-1.1.0.exe` (~95 MB) | **No install at all** — one file you can keep on a USB stick or any folder |
+
+*Exact sizes and SHA-256 hashes for every release artifact live in the release's checksums file — compare before you trust a download.*
 
 **Step 3.** Run the file.
 
@@ -111,7 +113,7 @@ winget install --id Git.Git -e --source winget
 
 Close and reopen the Terminal afterwards so `git` is on PATH.
 
-### Step 2 — Install Node.js LTS (skip if you already have Node 18+)
+### Step 2 — Install Node.js LTS (skip if `node -v` already shows v22 or newer)
 
 ```powershell
 winget install --id OpenJS.NodeJS.LTS -e --source winget
@@ -163,9 +165,10 @@ Output lands in the **`dist\`** folder:
 
 | Artifact | Type |
 |---|---|
-| `dist\Rekzora-Setup-1.0.0.exe` | NSIS installer (per-user, EULA page) |
-| `dist\Rekzora-Portable-1.0.0.exe` | Portable single-file exe |
-| `dist\Rekzora-Setup-1.0.0.exe.blockmap` | delta-update metadata |
+| `dist\Rekzora-Setup-<version>.exe` | NSIS installer (per-user, EULA page) |
+| `dist\Rekzora-Portable-<version>.exe` | Portable single-file exe |
+| `dist\Rekzora-Setup-<version>.exe.blockmap` | delta-update metadata |
+| `SHA256SUMS.txt` | checksums for the exe artifacts (CI builds) |
 
 Need only one of them?
 
@@ -224,7 +227,7 @@ Everything above can be deleted to reset Rekzora to day one (no registry keys ar
 - **Windows report says recording is blocked** → allow desktop apps to use the camera/microphone in Windows Privacy settings.
 - **Hotkeys do nothing** → another app (OBS, Game Bar…) may own F9/F10; rebind in Rekzora Settings.
 - **Window recording shows black** → the target app is DRM/protected content (movies, some browsers) which Windows prevents from being captured.
-- **Port 3000/High CPU when idle** → normal usage is near-zero; if you see otherwise, check `logs\rekzora.log` and open an issue.
+- **High CPU when idle** → normal usage is near-zero; if you see otherwise, check `logs\rekzora.log` and open an issue.
 
 ## 🌐 Releases & CI
 
@@ -236,8 +239,21 @@ in [`RELEASE.md`](RELEASE.md).
 To publish a release from this machine:
 
 ```powershell
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
+```
+
+The tag must match `package.json`'s version — CI refuses mismatched tags.
+
+## ✅ Regression tests
+
+The repo ships a dependency-free test suite (69 tests) covering the recording
+session state machine, IPC guard roles, share-launch registry, WebM probing,
+crash manifests, the settings schema and the atomic JSON store:
+
+```powershell
+npm test        # runs `node --test`
+npm run smoke   # headless live self-test (REKZORA_SMOKE=1, exit code honest)
 ```
 
 ## 🗂 Project structure
@@ -248,6 +264,10 @@ rekzora/
 ├── preload.js                     # Secure contextBridge (window.rekzora API)
 ├── package.json                   # App identity + electron-builder config
 ├── Start-Rekzora.bat              # One-click dev launcher (logs to logs\rekzora.log)
+├── lib/                           # Testable core modules (sessions, IPC guard,
+│                                  #   manifests, WebM checks, share registry,
+│                                  #   store, settings schema)
+├── tests/                         # `node --test` regression suite (69 tests)
 ├── src/
 │   ├── renderer/
 │   │   ├── index.html             # App UI
@@ -283,9 +303,20 @@ rekzora/
    (the mic gets a gentle compressor to prevent clipping).
 4. A hidden `<video>` feeds a `<canvas>` each frame — enabling region cropping and the
    webcam picture-in-picture — and `requestFrame()` drives the canvas capture track at an exact fps.
-5. `MediaRecorder` (VP9/Opus WebM) is cut into 1-second chunks that are **appended directly to a
-   temp file on disk** (crash-safe), then atomically renamed into your recordings folder; metadata
-   is stored in the internal library database (no sidecar files in your videos folder).
+5. `MediaRecorder` (VP9/Opus WebM) is cut into 1-second chunks; the renderer
+   streams chunks over IPC under a **main-owned session id** into a bounded
+   write queue that appends them directly to a temp file on disk (crash-safe,
+   with real backpressure — it ends the recording honestly instead of eating
+   your RAM if the disk falls behind), then the file is atomically renamed
+   into your recordings folder; crash manifests record progress so an
+   interrupted take shows up in the recovery banner; metadata lives in the
+   internal library database (no sidecar files in your videos folder), and
+   playback streams through a main-owned `rekzora-video://` protocol that
+   honors Range requests.
+
+6. Every renderer call is validated against the IPC guard (source, role,
+   message schema) and every settings write is schema-checked and landed
+   atomically with a rolling backup.
 
 ## 🗺 Roadmap
 
