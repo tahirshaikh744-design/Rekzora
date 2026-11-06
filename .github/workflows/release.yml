@@ -2,7 +2,8 @@ name: Release Rekzora
 
 # Release pipeline (v1.1 — honest and pinned):
 #   1. guard: the pushed tag must equal package.json's version
-#   2. npm ci (reproducible) → unit tests (regression suite)
+#   2. npm ci (reproducible) → electron runtime binary (install-electron) →
+#      unit tests (regression suite)
 #   3. headless smoke test (real recording in a real window, honest exit code)
 #   4. build NSIS + Portable WITHOUT auto-publish
 #   5. SHA-256 checksums file for the exes
@@ -54,6 +55,24 @@ jobs:
 
       - name: Install dependencies (reproducible)
         run: npm ci --no-audit --no-fund
+
+      - name: Ensure Electron binary is installed
+        shell: pwsh
+        run: |
+          # electron 45+ ships no postinstall hook, so `npm ci` installs only
+          # the JS shim and never downloads the runtime binary. install.js is
+          # the package's own installer (the install-electron bin); it is
+          # idempotent and exits 0 immediately when dist is already present.
+          node node_modules\electron\install.js
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Refusing: electron binary install failed with exit $LASTEXITCODE"
+            exit 1
+          }
+          if (-not (Test-Path node_modules\electron\dist\electron.exe)) {
+            Write-Host "Refusing: node_modules\electron\dist\electron.exe is still missing after install - cannot run the smoke test or build."
+            exit 1
+          }
+          Write-Host "Electron runtime present: node_modules\electron\dist\electron.exe"
 
       - name: Unit tests (regression suite)
         run: npm test

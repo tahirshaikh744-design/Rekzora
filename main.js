@@ -1814,7 +1814,14 @@ async function runSmokeTest() {
 const gotLock = app.requestSingleInstanceLock();
 
 if (!gotLock) {
-  app.quit();
+  if (process.env.REKZORA_SMOKE === '1') {
+    /* A second instance never runs the smoke assertions. Exiting 0 here
+       would report a PASS that never happened — fail loudly instead. */
+    log('[smoke] FAILED: another Rekzora instance is already running — no smoke assertions were made.');
+    app.exit(1);
+  } else {
+    app.quit();
+  }
 } else {
   app.on('second-instance', () => showMainWindow());
 
