@@ -1,8 +1,15 @@
 name: Release Rekzora
 
-# Prepares & publishes a GitHub Release with BOTH artifacts:
-#   - Rekzora-Setup-<version>.exe     (NSIS installed, EULA page)
-#   - Rekzora-Portable-<version>.exe  (portable single file)
+# Release pipeline (v1.1 — honest and pinned):
+#   1. guard: the pushed tag must equal package.json's version
+#   2. npm ci (reproducible) → unit tests (regression suite)
+#   3. headless smoke test (real recording in a real window, honest exit code)
+#   4. build NSIS + Portable WITHOUT auto-publish
+#   5. SHA-256 checksums file for the exes
+#   6. create/upgrade the GitHub Release, attach exes + checksums + notes
+#      (tag pushes only — workflow_dispatch runs are build-only)
+# All third-party actions are pinned to exact commit SHAs (supply-chain
+# hardening); no floating major tags in this file.
 # Brand: NEURON TS LABS · Author: Mohd Tahir Shaikh
 
 on:
@@ -17,29 +24,83 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout (pinned: actions/checkout@v7.0.1)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js 22 (pinned: actions/setup-node@v7.1.0)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
+          cache: npm
 
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
+      - name: Guard — tag must match package.json version
+        shell: pwsh
+        run: |
+          $pkgVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tagVersion = "${{ github.ref_name }}" -replace '^v', ''
+          if ("${{ github.ref_name }}" -notlike 'v*') {
+            Write-Error "Refusing: ref '${{ github.ref_name }}' is not a v-version tag (only v-prefixed tags may release)."
+          }
+          if ($tagVersion -ne $pkgVersion) {
+            Write-Error "Refusing: tag v$tagVersion does not match package.json version $pkgVersion. Fix the tag or bump the version."
+          }
+          Write-Host "Tag/version gate passed: v$tagVersion == $pkgVersion"
+
+      - name: Install dependencies (reproducible)
+        run: npm ci --no-audit --no-fund
+
+      - name: Unit tests (regression suite)
+        run: npm test
 
       - name: Generate EULA RTF (installer license page)
         run: node scripts/make-license-rtf.cjs
 
-      - name: Build & publish (NSIS + portable)
-        run: npx electron-builder --win nsis portable --publish always
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # For a SIGNED build ("verified publisher"), add your secret certs:
-        # env:
-        #   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        #   CSC_LINK: ${{ secrets.CSC_LINK }}              # .pfx base64 or URL
-        #   CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+      - name: Headless smoke test (live app, honest exit code)
+        run: node scripts/smoke.mjs
 
-      - name: Apply the hand-written release notes (RELEASE-NOTES.md)
+      - name: Build NSIS + Portable (no auto-publish)
+        run: npx electron-builder --win nsis portable --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'FALSE'
+        # For a SIGNED build ("verified publisher"), provide these secrets
+        # so electron-builder picks them up automatically:
+        #   CSC_LINK, CSC_KEY_PASSWORD
+
+      - name: Write SHA-256 checksums
+        shell: pwsh
+        run: |
+          $exes = Get-ChildItem dist -Filter *.exe | Where-Object { $_.Name -notlike '*.blockmap*' }
+          if ($exes.Count -lt 2) {
+            Write-Error "Refusing: expected Setup + Portable, found $($exes.Count) exe artifacts."
+          }
+          $lines = foreach ($exe in $exes) {
+            $hash = (Get-FileHash -Algorithm SHA256 $exe.FullName).Hash.ToLower()
+            "$hash  $($exe.Name)"
+          }
+          ($lines -join "`r`n") + "`r`n" | Set-Content -NoNewline -Encoding ascii dist\SHA256SUMS.txt
+          Get-Content dist\SHA256SUMS.txt
+
+      - name: Create GitHub Release and attach artifacts
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit ${{ github.ref_name }} --title "Rekzora ${{ github.ref_name }}" --notes-file RELEASE-NOTES.md
+        shell: pwsh
+        run: |
+          $files = @('dist\Rekzora-Setup-1.1.0.exe', 'dist\Rekzora-Portable-1.1.0.exe', 'dist\SHA256SUMS.txt') |
+            Where-Object { Test-Path $_ }
+          $tag = "${{ github.ref_name }}"
+          $existing = gh release view $tag --json id 2>$null
+          if ($LASTEXITCODE -eq 0 -and $existing) {
+            Write-Host "Release $tag exists — uploading with --clobber"
+            gh release upload $tag @files --clobber
+            gh release edit $tag --title "Rekzora $tag" $(if (Test-Path RELEASE-NOTES.md) { @("--notes-file", "RELEASE-NOTES.md") })
+          } else {
+            Write-Host "Creating release $tag"
+            if (Test-Path RELEASE-NOTES.md) {
+              gh release create $tag @files --title "Rekzora $tag" --notes-file RELEASE-NOTES.md
+            } else {
+              Write-Warning "RELEASE-NOTES.md is missing — the release will carry generated notes."
+              gh release create $tag @files --title "Rekzora $tag" --generate-notes
+            }
+          }
+          if ($LASTEXITCODE -ne 0) { Write-Error "GitHub Release step failed." }
