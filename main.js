@@ -477,6 +477,45 @@ function setupDisplayMediaHandler() {
   });
 }
 
+/* ---------------- Permission handlers (v1.1 Phase D) ----------------
+   Deny-by-default: media capture is the only permission this app has any
+   reason to grant, and only to its own windows (offline file: content).
+   Everything else — notifications, geolocation, clipboard reads, MIDI… —
+   is refused; renderer code never needs it (clipboard writes go through
+   the guarded app:clipboard-write IPC channel in the main process). */
+const GRANTED_PERMISSIONS = new Set(['media', 'desktopCapturer', 'display-capture']);
+
+function permissionDecision(permission, wc) {
+  try {
+    if (!GRANTED_PERMISSIONS.has(permission)) return false;
+    if (!wc || typeof wc.getURL !== 'function' || wc.isDestroyed()) return false;
+    return guardIsTrustedUrl(wc.getURL());
+  } catch {
+    return false;
+  }
+}
+
+function setupPermissionHandlers() {
+  const ses = session.defaultSession;
+  ses.setPermissionRequestHandler((wc, permission, callback) => {
+    const grant = permissionDecision(permission, wc);
+    if (!grant) log('permission refused:', permission, 'from', (wc && !wc.isDestroyed() ? wc.getURL() : '?').slice(0, 80));
+    callback(grant);
+  });
+  ses.setPermissionCheckHandler((wc, permission, requestingOrigin) => {
+    /* sync counterpart: navigator.permissions.query / internal checks must
+       agree with the request handler, same trusted-origin rule */
+    let trusted = true;
+    try {
+      trusted = guardIsTrustedUrl(requestingOrigin);
+      if (wc && typeof wc.getURL === 'function' && !wc.isDestroyed()) {
+        trusted = trusted && guardIsTrustedUrl(wc.getURL());
+      }
+    } catch { trusted = false; }
+    return trusted && GRANTED_PERMISSIONS.has(permission);
+  });
+}
+
 /* ---------------- Tray ---------------- */
 function trayIcon() {
   return nativeImage.createFromPath(path.join(__dirname, 'assets', 'icon-32.png'));
@@ -1663,6 +1702,36 @@ async function runSmokeTest() {
           }
           log('[smoke] file:', exists, '| size:', size, '| webm ok:', webm.valid,
             '| duration:', detail.durationMs, 'ms | library entry:', !!entry);
+
+          /* playback probe (v1.1): resolve the library id to rekzora-video://,
+             load it in a fresh <video> element from the MAIN window, and wait
+             for metadata — exercises protocol.handle + streaming on whatever
+             Electron is installed, end to end. */
+          let playback = null;
+          try {
+            playback = await wc.executeJavaScript(`(new Promise((resolve) => {
+              const P = (m) => { try { window.rekzora.log('[smkdbg] ' + m); } catch (_) {} };
+              const v = document.createElement('video');
+              v.preload = 'metadata';
+              const done = (r) => { try { v.removeAttribute('src'); v.load(); v.remove(); } catch (_) {} resolve(r); };
+              v.addEventListener('loadedmetadata', () => {
+                P('playback metadata');
+                done({ ok: true, w: v.videoWidth, h: v.videoHeight, dur: Math.round(v.duration * 1000) });
+              }, { once: true });
+              v.addEventListener('error', () => {
+                P('playback media error');
+                done({ ok: false, why: 'media error' });
+              }, { once: true });
+              v.src = 'rekzora-video://' + ${JSON.stringify(String(detail.id))} + '/video';
+              P('playback probe src set');
+              setTimeout(() => done({ ok: false, why: 'timeout' }), 8000);
+            }))`, true);
+          } catch (e) { playback = { ok: false, why: 'executeJavaScript failed: ' + (e && e.message) }; }
+          log('[smoke] playback:', JSON.stringify(playback));
+          if (!playback || !playback.ok) {
+            log('[smoke] FAILED: playback over rekzora-video:// did not work');
+            smokeFailed = true;
+          }
         }
         // clean up the test artifact (own recording only)
         try {
@@ -1741,6 +1810,7 @@ if (!gotLock) {
     }
     migrateSidecars();
     setupDisplayMediaHandler();
+    setupPermissionHandlers();
     registerIpc();
     createMainWindow();
 
