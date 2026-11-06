@@ -536,6 +536,59 @@ function senderOf(event) {
   return { wcId: event.sender.id, role: (guard && guard.roleOf(event.sender.id)) || 'MAIN' };
 }
 
+/* ---- crash recovery scan (§6.5 B4) ----
+   Every manifest that still describes an existing temp file is a candidate
+   the user gets offered — with an honest playable/broken verdict. */
+const dismissedRecovery = new Set(); // session-scoped "don't show again"
+
+async function scanRecoverables() {
+  try {
+    if (!manifestStore) return [];
+    const manifests = await manifestStore.listAll();
+    const out = [];
+    for (const m of manifests) {
+      if (m.finalization === 'completed' || m.finalization === 'partial') continue;
+      if (dismissedRecovery.has(m.sessionId)) continue;
+      const tempPath = path.join(tmpDir, m.tempFileName);
+      if (!isInsideDir(tempPath, tmpDir) || !fs.existsSync(tempPath)) {
+        /* manifest without a file: swap gone → drop quietly */
+        await manifestStore.remove(m.sessionId).catch(() => {});
+        continue;
+      }
+      const stat = await fsp.stat(tempPath).catch(() => null);
+      if (!stat || !stat.isFile()) continue;
+      let playable = false;
+      let webmReason = '';
+      try {
+        const head = await readHeadForCheck(tempPath, 4 * 1024 * 1024);
+        const webm = checkWebM(head);
+        playable = !!webm.hasCluster && !!webm.webm;
+        webmReason = webm.reason;
+      } catch (e) { webmReason = e && e.message; }
+      if (stat.size === 0) {
+        /* empty temp with a manifest: nothing to recover, clean both */
+        await fsp.rm(tempPath, { force: true }).catch(() => {});
+        await manifestStore.remove(m.sessionId).catch(() => {});
+        continue;
+      }
+      out.push({
+        id: m.sessionId,
+        bytes: stat.size,
+        chunks: m.chunksCommitted,
+        writeFailures: m.writeFailures,
+        startedAt: m.startTime,
+        lastWriteAt: m.lastWriteAt,
+        playable,
+        webmReason
+      });
+    }
+    return out;
+  } catch (e) {
+    log('recovery scan failed:', e && e.message);
+    return [];
+  }
+}
+
 /* Retention policy (§6.4): a temp file is "abandoned" only if it has no
    manifest AND zero content. Files with a manifest are ride crash-recovery
    candidates — the recovery UI decides their fate, never this cleanup. */
@@ -1463,6 +1516,59 @@ function registerIpc() {
       return true;
     } catch (e) { log('openwith failed', e); return false; }
   });
+
+  /* crash recovery (§6.5 B4): the renderer speaks in manifest session ids */
+  H('recovery:list', () => scanRecoverables());
+  H('recovery:recover', async ([sessionId]) => {
+    if (typeof sessionId !== 'string' || !/^[0-9a-f]{32}$/.test(sessionId)) throw new GuardError('SCHEMA', 'bad recovery id');
+    const m = await manifestStore.load(sessionId);
+    if (!m) throw new Error('No such recovery entry');
+    const tempPath = path.join(tmpDir, m.tempFileName);
+    if (!isInsideDir(tempPath, tmpDir) || !fs.existsSync(tempPath)) throw new Error('The recoverable file is gone');
+    const head = await readHeadForCheck(tempPath, 4 * 1024 * 1024);
+    const webm = checkWebM(head);
+    if (!webm.hasCluster) {
+      /* offer deletion instead of a corrupt file masquerading as footage */
+      throw new GuardError('RECOVERY_BROKEN', 'This footage is broken (container has no media) — use Delete.');
+    }
+    ensureDirs();
+    const finalPath = uniquePath(saveDir, sanitizeName(`Recovered Recording ${dateStamp()}`), '.webm');
+    await finalizeMove(tempPath, finalPath);
+    const st = await fsp.stat(finalPath);
+    const gid = grantLibId(finalPath);
+    libSet(finalPath, cleanLibMeta({
+      title: path.basename(finalPath, '.webm'),
+      fileName: path.basename(finalPath),
+      created: Date.now(),
+      durationMs: 0,   // unknown for crashed takes; measured metadata comes in Phase F
+      size: st.size,
+      recovered: true,
+      partial: (m.writeFailures || 0) > 0,
+      partialReason: (m.writeFailures || 0) > 0 ? `${m.writeFailures} chunk write failure(s) during the original recording` : null,
+      id: gid
+    }));
+    await manifestStore.remove(sessionId).catch(() => {});
+    dismissedRecovery.delete(sessionId);
+    broadcastRecordingsChanged();
+    return { ok: true, id: gid, fileName: path.basename(finalPath), size: st.size };
+  });
+  H('recovery:delete', async ([sessionId]) => {
+    if (typeof sessionId !== 'string' || !/^[0-9a-f]{32}$/.test(sessionId)) throw new GuardError('SCHEMA', 'bad recovery id');
+    const m = await manifestStore.load(sessionId);
+    if (m) {
+      const tempPath = path.join(tmpDir, m.tempFileName);
+      if (isInsideDir(tempPath, tmpDir)) await fsp.rm(tempPath, { force: true }).catch(() => {});
+    }
+    await manifestStore.remove(sessionId).catch(() => {});
+    dismissedRecovery.delete(sessionId);
+    return true;
+  });
+  H('recovery:dismiss', ([sessionId]) => {
+    if (typeof sessionId !== 'string' || !/^[0-9a-f]{32}$/.test(sessionId)) throw new GuardError('SCHEMA', 'bad recovery id');
+    /* hides it from THIS session's banner only; the file + manifest survive */
+    dismissedRecovery.add(sessionId);
+    return true;
+  });
 }
 
 /* region/float bounds sanity: numbers clamped into sane desktop ranges */
@@ -1623,6 +1729,11 @@ if (!gotLock) {
     /* Player media server: rekzora-video://<libraryId>/video */
     setupPlaybackProtocol();
 
+    /* early visibility of recoverable takes (the renderer re-queries live) */
+    scanRecoverables().then((rows) => {
+      if (rows.length) log('recovery candidates from a previous session:', rows.length);
+    }).catch(() => {});
+
     /* One-time migration: existing installs get the new light default */
     if (!settings.get('themeMigrated')) {
       settings.set({ theme: 'light', themeMigrated: true });
@@ -1657,13 +1768,63 @@ if (!gotLock) {
     if (!recActive && !settings.get('closeToTray')) app.quit();
   });
 
-  app.on('before-quit', () => {
+  /* ---- quit handshake (§6.5 B3) ----
+     Quitting while a recording is live must not shred the take: hold the
+     quit once, ask the user, then wait a bounded time for the recording to
+     finish. If the user confirms a hard stop we flush recovery manifests
+     and proceed — the temp file + manifest survive for the recovery UI,
+     nothing is silently destroyed either way. */
+  const quitGuard = { held: false, forced: false };
+  function flushAllManifests() {
+    try { if (manifestStore) manifestStore.flushPending().catch(() => {}); } catch { /* ignore */ }
+  }
+  app.on('before-quit', (e) => {
     quitting = true;
     globalShortcut.unregisterAll();
-    /* Destroy the tray icon explicitly — otherwise Windows cleans up the
-       notification icon lazily, leaving ghost icons in the tray area until
-       the mouse is moved over them (especially after force-killed runs). */
     try { if (tray) { tray.destroy(); tray = null; } } catch { /* ignore */ }
+
+    if (quitGuard.forced || !recActive) {
+      flushAllManifests();          // no recording: just land debounced writes
+      return;
+    }
+    e.preventDefault();
+    if (quitGuard.held) return;     // a dialog is already up; it owns the loop
+    quitGuard.held = true;
+
+    let answer = null;              // synchronous modal — the only safe choice here
+    try {
+      answer = dialog.showMessageBoxSync(mainWin && !mainWin.isDestroyed() ? mainWin : {}, {
+        type: 'question',
+        buttons: ['Stop & save, then quit', 'Quit without saving', 'Cancel'],
+        defaultId: 0,
+        cancelId: 2,
+        title: 'Recording in progress',
+        message: 'A recording is still in progress.',
+        detail: 'Stop & save finalizes what has been recorded so far. Quit without saving keeps the captured footage as a recoverable file.'
+      });
+    } catch { answer = 1; }
+
+    if (answer === 0) {
+      /* ask the recorder to stop; wait bounded for completion */
+      try { sendToMain('recorder:action', { action: 'stop' }); } catch { /* */ }
+      const t0 = Date.now();
+      const wait = setInterval(() => {
+        if (!recActive || Date.now() - t0 > 15000) {
+          clearInterval(wait);
+          quitGuard.forced = true;
+          flushAllManifests();
+          app.quit();
+        }
+      }, 150);
+    } else if (answer === 1) {
+      quitGuard.forced = true;
+      flushAllManifests();
+      app.quit();
+    } else {
+      /* user cancelled — release the guard so quitting stays possible later */
+      quitGuard.held = false;
+      quitting = false;
+    }
   });
 
   process.on('uncaughtException', (e) => console.error('[uncaught]', e));

@@ -32,7 +32,8 @@ const CHANNELS_MAIN = [
   'region:begin', 'region:get-bounds',
   'float:show', 'float:hide',
   'app:version', 'app:clipboard-write',
-  'share:apps', 'share:launch', 'share:openwith'
+  'share:apps', 'share:launch', 'share:openwith',
+  'recovery:list', 'recovery:recover', 'recovery:delete', 'recovery:dismiss'
 ];
 const CHANNELS_FLOATING = [];
 const CHANNELS_REGION = [];
@@ -95,6 +96,13 @@ const bridgeFull = {
     pickFolder: () => invoke('recordings:folder-pick'),
     openFolder: () => invoke('recordings:folder-open'),
     onChanged: (cb) => on('recordings:changed', cb)
+  },
+  /* crash-recovery offers (§6.5 B4): ids are manifest session ids */
+  recovery: {
+    list: () => invoke('recovery:list'),
+    recover: (id) => invoke('recovery:recover', id),
+    del: (id) => invoke('recovery:delete', id),
+    dismiss: (id) => invoke('recovery:dismiss', id)
   },
   region: {
     begin: (payload) => invoke('region:begin', payload),

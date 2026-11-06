@@ -665,6 +665,71 @@
   let libraryItems = [];
   let currentRecording = null;
 
+  /* ---- crash-recovery banner (§6.5 B4, UI side) ---- */
+  let recoveryItems = [];
+  async function renderRecoveryBanner() {
+    const banner = $('#recovery-banner');
+    if (!banner) return;
+    try { recoveryItems = await rekzora.recovery.list(); } catch (e) {
+      rekzora.log('recovery list error:', e && e.message);
+      recoveryItems = [];
+    }
+    banner.hidden = recoveryItems.length === 0;
+    const list = $('#recovery-list');
+    if (!list) return;
+    list.innerHTML = '';
+    for (const row of recoveryItems) {
+      const el = document.createElement('div');
+      el.className = 'recovery-row' + (row.playable ? '' : ' rr-broken');
+      const when = row.lastWriteAt ? fmtDate(row.lastWriteAt) : 'unknown time';
+      const meta = row.playable
+        ? `${fmtBytes(row.bytes)} · last updated ${when}${row.writeFailures ? ' · ' + row.writeFailures + ' write issue(s)' : ''}`
+        : `${fmtBytes(row.bytes)} · file damaged — only deletable`;
+      el.innerHTML = `
+        <span>${row.playable ? '🎬' : '⚠️'}</span>
+        <span class="rr-name"></span>
+        <span class="rr-meta"></span>
+        <span class="recovery-actions"></span>`;
+      el.querySelector('.rr-name').textContent =
+        'Screen recording from ' + (row.startedAt ? fmtDate(row.startedAt) : 'previous session');
+      el.querySelector('.rr-meta').textContent = meta;
+      const actions = el.querySelector('.recovery-actions');
+      if (row.playable) {
+        const keep = document.createElement('button');
+        keep.className = 'ghost-btn';
+        keep.textContent = 'Keep';
+        keep.onclick = () => recoverOne(row);
+        actions.appendChild(keep);
+      }
+      const drop = document.createElement('button');
+      drop.className = 'ghost-btn danger';
+      drop.textContent = 'Delete';
+      drop.onclick = () => deleteRecovered(row);
+      actions.appendChild(drop);
+      list.appendChild(el);
+    }
+  }
+  async function recoverOne(row) {
+    try {
+      const res = await rekzora.recovery.recover(row.id);
+      if (res && res.ok) toast(`Recovered as "${res.fileName}".`);
+      renderLibrary();
+    } catch (e) {
+      toast(e && e.message ? `Recovery failed: ${e.message}` : 'Recovery failed.', { level: 'error' });
+      renderLibrary();
+    }
+  }
+  async function deleteRecovered(row) {
+    try { await rekzora.recovery.del(row.id); } catch { /* ignore */ }
+    renderLibrary();
+  }
+  $('#recovery-dismiss-all').onclick = async () => {
+    for (const r of recoveryItems) {
+      try { await rekzora.recovery.dismiss(r.id); } catch { /* ignore */ }
+    }
+    renderLibrary();
+  };
+
   async function renderLibrary() {
     let folder = settings.saveDir;
     $('#lib-folder').textContent = folder;
@@ -672,6 +737,7 @@
     try {
       libraryItems = await rekzora.recordings.list();
     } catch { libraryItems = []; }
+    renderRecoveryBanner();
 
     const items = q
       ? libraryItems.filter(i => (i.title + i.fileName).toLowerCase().includes(q))

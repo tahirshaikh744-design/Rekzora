@@ -47,18 +47,75 @@
 
   function withTimeout(promise, ms, label) {
     let rej;
-    const timer = setTimeout(() => rej && rej(new Error(label + ' timed out')), ms);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      rej && rej(new Error(label + ' timed out'));
+    }, ms);
     const wrapped = new Promise((resolve, reject) => {
       rej = reject;
-      promise.then(resolve, reject);
+      promise.then(
+        (v) => { if (!timedOut) resolve(v); else if (v && typeof v.getTracks === 'function') stopStream(v); },
+        reject
+      );
     });
-    return wrapped.finally(() => clearTimeout(timer));
+    wrapped.finally(() => clearTimeout(timer));
+    return wrapped;
   }
 
   function computeBitrate(quality, w, h) {
     const base = { low: 3_500_000, medium: 8_000_000, high: 14_000_000, ultra: 24_000_000 }[quality] || 8_000_000;
     const factor = (w * h) / (1920 * 1080);
     return Math.round(Math.min(42_000_000, Math.max(1_500_000, base * Math.max(0.5, factor))));
+  }
+
+  /* ---- bounded chunk queue (§6.5 B2) ---- */
+  const WRITE_ERR_STOP = 5;      // consecutive-failure threshold → graceful stop
+  const QUEUE_HARD_CAP = 16;     // buffered-but-unwritten chunks → disk too slow
+
+  function pumpChunks(s) {
+    if (!s || s.pumping || !s.recordingId) return;
+    s.pumping = true;
+    s.pumpRun = (async () => {
+      while (s.pendingBlobs && s.pendingBlobs.length > 0) {
+        /* honest backpressure: if the disk cannot keep up with the encoder,
+           end the recording gracefully (chunks already written stay valid,
+           finalization marks the take PARTIAL — no silent byte loss) */
+        if (s.pendingBlobs.length > QUEUE_HARD_CAP && rec.state === State.RECORDING) {
+          if (!s.queueStopNotified) {
+            s.queueStopNotified = true;
+            window.dispatchEvent(new CustomEvent('rekzora:recorder-note', {
+              detail: { level: 'warn', message: 'Saving is falling behind — ending the recording so your footage stays playable.' }
+            }));
+          }
+          stop();
+        }
+        s.queueDepth = s.pendingBlobs.length;
+        const blob = s.pendingBlobs[0];
+        try {
+          const buf = await blob.arrayBuffer();
+          await rekzora.rec.chunk(s.recordingId, new Uint8Array(buf));
+          s.pendingBlobs.shift();
+        } catch (e2) {
+          s.writeErrors++;
+          err('chunk write failed:', e2 && e2.message);
+          /* drop the failed chunk so the queue keeps moving */
+          s.pendingBlobs.shift();
+          if (rec.state !== State.STOPPING && s.writeErrors >= WRITE_ERR_STOP) {
+            window.dispatchEvent(new CustomEvent('rekzora:recorder-note', {
+              detail: { level: 'error', message: 'Disk write failure — stopping the recording to protect your data.' }
+            }));
+            stop();
+            /* keep draining: whatever can still be written belongs in the file */
+          }
+        }
+        await new Promise((r) => setTimeout(r, 0)); // yield between chunk writes
+      }
+      s.queueDepth = 0;
+    })().finally(() => {
+      s.pumping = false;
+      s.pumpRun = null;
+    });
   }
 
   function even(n) {
@@ -73,12 +130,27 @@
     }
   }
 
-  function mixTracks(tracks) {
+  async function mixTracks(tracks) {
     const alive = tracks.filter(Boolean);
     if (alive.length === 0) return { track: null, ctx: null };
     if (alive.length === 1) return { track: alive[0], ctx: null };
     const AC = window.AudioContext || window.webkitAudioContext;
     const ctx = new AC();
+    /* (§6.5 B7) a suspended AudioContext produces a SILENT mixed track — on
+       cold starts it can start suspended, so resume + verify explicitly. */
+    if (ctx.state === 'suspended') {
+      try { await ctx.resume(); } catch (e) { err('audioCtx resume failed:', e && e.message); }
+    }
+    if (ctx.state !== 'running') {
+      /* cannot mix without a running context: better to pass the first
+         source track through (≥ silence) and warn than record nothing */
+      err('audioCtx not running (' + ctx.state + ') — passing source audio through');
+      try { ctx.close().catch(() => {}); } catch { /* ignore */ }
+      window.dispatchEvent(new CustomEvent('rekzora:recorder-note', {
+        detail: { level: 'warn', message: 'Audio mixing unavailable — the first audio source was recorded unmixed.' }
+      }));
+      return { track: alive[0], ctx: null };
+    }
     const dest = ctx.createMediaStreamDestination();
     for (const t of alive) {
       try {
@@ -100,18 +172,28 @@
   }
 
   function cleanup(session) {
+    /* idempotent: run repeatedly on every ending path without double-releasing */
     try {
-      if (!session) return;
-      if (session.drawTimer) clearInterval(session.drawTimer);
-      if (session.uiTimer) clearInterval(session.uiTimer);
-      if (session.audioCtx && session.audioCtx.state !== 'closed') session.audioCtx.close().catch(() => {});
+      if (!session || session.cleaned) return;
+      session.cleaned = true;
+      if (session.drawTimer) { clearInterval(session.drawTimer); session.drawTimer = null; }
+      if (session.uiTimer) { clearInterval(session.uiTimer); session.uiTimer = null; }
+      if (session.audioCtx && session.audioCtx.state !== 'closed') {
+        try { session.audioCtx.close().catch(() => {}); } catch { /* ignore */ }
+        session.audioCtx = null;
+      }
+      /* (§6.5 B5) the canvas pipeline stream is app-owned, stop it too */
+      stopStream(session.outStream);
       stopStream(session.gdmStream);
       stopStream(session.micStream);
       stopStream(session.camStream);
       if (session.videoEl && session.videoEl.srcObject) {
         session.videoEl.srcObject = null;
         session.videoEl.remove();
+      } else if (session.videoEl) {
+        session.videoEl.remove();
       }
+      session.videoEl = null;
     } catch { /* ignore */ }
   }
 
@@ -194,9 +276,11 @@
     const session = {
       cfg,
       writeErrors: 0,
+      pendingBlobs: [],
       queueDepth: 0,
-      writeChain: Promise.resolve(),
-      chunkQueue: Promise.resolve(),
+      queueStopNotified: false,
+      pumping: false,
+      pumpRun: null,
       thumb: null,
       audioCtx: null,
       drawTimer: null,
@@ -384,9 +468,12 @@
         session.drawTimer = setInterval(draw, 1000 / fps);
       }
       session.cTrack = cTrack;
+      /* (§6.5 B5) remember the encoder-side canvas stream so cleanup() can
+         stop it — nobody else owns it; leaking it keeps an encoder alive */
+      session.outStream = outVideoStream;
 
       /* 7. Audio mixing (mic gets a light compressor) */
-      const { track: audioTrack, ctx: audioCtx } = mixTracks([sysTrack, micTrack]);
+      const { track: audioTrack, ctx: audioCtx } = await mixTracks([sysTrack, micTrack]);
       session.audioCtx = audioCtx;
       session.audioTrack = audioTrack;
 
@@ -443,34 +530,21 @@
       });
 
       mr.addEventListener('dataavailable', (e) => {
+        /* (§6.5 B2) bounded chunk queue: chunks land in a small buffer and a
+           single pump sends them one-by-one (each await = one disk write),
+           so the renderer cannot outrun the disk by unbounded memory. */
         if (!e.data || !e.data.size || !s.recordingId) return;
-        const blob = e.data;
-        s.queueDepth = (s.queueDepth || 0) + 1;      // bounded-chunk tracking (§11)
-        s.writeChain = s.writeChain.then(async () => {
-          try {
-            const buf = await blob.arrayBuffer();
-            await rekzora.rec.chunk(s.recordingId, new Uint8Array(buf));
-            s.queueDepth = Math.max(0, (s.queueDepth || 1) - 1);
-          } catch (e2) {
-            s.writeErrors++;
-            err('chunk write failed:', e2 && e2.message);
-            if (s.writeErrors >= 5 && rec.state !== State.STOPPING) {
-              window.dispatchEvent(new CustomEvent('rekzora:recorder-note', {
-                detail: { level: 'error', message: 'Disk write failure — stopping recording to protect your data.' }
-              }));
-              stop();
-            }
-          }
-          s.queueDepth = Math.max(0, (s.queueDepth || 1) - 1);
-        });
+        s.pendingBlobs = s.pendingBlobs || [];
+        s.pendingBlobs.push(e.data);
+        pumpChunks(s);
       });
 
       /* 9. Begin temp file (opaque session id from the main process),
-         start recorder + timers */
+          start recorder + timers */
       const beginRes = await rekzora.rec.begin();
       s.recordingId = beginRes && beginRes.recordingId;
       if (!s.recordingId) throw new Error('Recording session was rejected by the main process');
-      s.writeChain = s.writeChain.then(() => rekzora.rec.chunk(s.recordingId, new Uint8Array(0))).catch(() => {});
+      pumpChunks(s); // create the header chunk sequence as data arrives
 
       s.startTs = performance.now();
       s.pausedAcc = 0;
@@ -542,8 +616,21 @@
     if (!s || (rec.state !== State.RECORDING && rec.state !== State.PAUSED)) return;
     setState(State.STOPPING);
     const finish = async () => {
-      // flush any pending chunk writes
-      await s.writeChain.catch(() => {});
+      // drain the chunk pump (last dataavailable may still be buffering)
+      const drain = async () => {
+        let guard = 0;
+        while (s.pumping && guard < 400 && s.recordingId) {
+          await new Promise((r) => setTimeout(r, 25));
+          guard++;
+        }
+        if (s.pendingBlobs && s.pendingBlobs.length) pumpChunks(s);
+        let guard2 = 0;
+        while (s.pumping && guard2 < 400) {
+          await new Promise((r) => setTimeout(r, 25));
+          guard2++;
+        }
+      };
+      try { await drain(); } catch { /* drain is best-effort */ }
       const durationMs = Math.round(elapsedMs());
       cleanup(s);
       try {

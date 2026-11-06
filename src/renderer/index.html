@@ -168,6 +168,19 @@
           </div>
         </div>
         <div class="lib-folder" id="lib-folder">…</div>
+        <!-- Crash-recovery banner (§6.5 B4): offers footage from an interrupted
+             previous session; hidden when there is nothing to offer -->
+        <div id="recovery-banner" class="recovery-banner" hidden>
+          <div class="recovery-head">
+            <span class="recovery-ico">🛟</span>
+            <div class="recovery-text">
+              <div class="recovery-title">Recovered unfinished recordings</div>
+              <div class="recovery-sub">A previous session was interrupted while recording. These takes were preserved — review and keep what you want.</div>
+            </div>
+            <button class="ghost-btn" id="recovery-dismiss-all">Dismiss</button>
+          </div>
+          <div id="recovery-list" class="recovery-list"></div>
+        </div>
         <input type="search" id="lib-search" class="search" placeholder="Search recordings…" />
         <div id="lib-grid" class="lib-grid"></div>
         <div id="lib-empty" class="empty" hidden>
