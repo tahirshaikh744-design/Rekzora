@@ -245,6 +245,11 @@ Every git tag `v*.*.*` (e.g. `v1.1.0`) pushed to GitHub triggers
    both exes + `SHA256SUMS.txt` — nothing is published until tests, smoke, the
    version gate and the checksums have all passed.
 
+Plain pushes to `main` and `workflow_dispatch` runs execute the **same test
+pipeline** (checkout → tests → smoke → build → checksums) but skip the
+publish step — so the quality gates run on every change, and a release can
+only ever come from a version-matching tag.
+
 Both actions are **pinned to exact commit SHAs** (no floating `@v4`-style tags). The release
 checklist lives in [`RELEASE.md`](RELEASE.md).
 

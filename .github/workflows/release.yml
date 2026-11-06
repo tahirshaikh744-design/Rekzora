@@ -14,6 +14,7 @@ name: Release Rekzora
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -24,25 +25,30 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
-      - name: Checkout (pinned: actions/checkout@v7.0.1)
+      - name: Checkout (pinned to actions/checkout v7.0.1)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Setup Node.js 22 (pinned: actions/setup-node@v7.1.0)
+      - name: Setup Node.js 22 (pinned to actions/setup-node v7.1.0)
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
 
-      - name: Guard — tag must match package.json version
+      - name: Guard - tag must match package.json version
+        if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
           $pkgVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $tagVersion = "${{ github.ref_name }}" -replace '^v', ''
+          # pwsh Write-Error does not stop the run by default — every refusal
+          # must exit non-zero explicitly so the step fails.
           if ("${{ github.ref_name }}" -notlike 'v*') {
-            Write-Error "Refusing: ref '${{ github.ref_name }}' is not a v-version tag (only v-prefixed tags may release)."
+            Write-Host "Refusing: ref '${{ github.ref_name }}' is not a v-version tag (only v-prefixed tags may release)."
+            exit 1
           }
           if ($tagVersion -ne $pkgVersion) {
-            Write-Error "Refusing: tag v$tagVersion does not match package.json version $pkgVersion. Fix the tag or bump the version."
+            Write-Host "Refusing: tag v$tagVersion does not match package.json version $pkgVersion. Fix the tag or bump the version."
+            exit 1
           }
           Write-Host "Tag/version gate passed: v$tagVersion == $pkgVersion"
 
@@ -56,7 +62,8 @@ jobs:
         run: node scripts/make-license-rtf.cjs
 
       - name: Headless smoke test (live app, honest exit code)
-        run: node scripts/smoke.mjs
+        shell: cmd
+        run: scripts\smoke-run.bat
 
       - name: Build NSIS + Portable (no auto-publish)
         run: npx electron-builder --win nsis portable --publish never
@@ -86,8 +93,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          $files = @('dist\Rekzora-Setup-1.1.0.exe', 'dist\Rekzora-Portable-1.1.0.exe', 'dist\SHA256SUMS.txt') |
+          $files = @((Get-ChildItem dist -Filter *.exe | ForEach-Object { $_.FullName }) + 'dist\SHA256SUMS.txt') |
             Where-Object { Test-Path $_ }
+          if ($files.Count -lt 2) {
+            Write-Error "Refusing: expected Setup + Portable + checksums, found: $($files -join ', ')"
+          }
           $tag = "${{ github.ref_name }}"
           $existing = gh release view $tag --json id 2>$null
           if ($LASTEXITCODE -eq 0 -and $existing) {
