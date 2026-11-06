@@ -183,6 +183,16 @@ There is also the helper script used by this project (installs deps first, then 
 powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 ```
 
+Want the branded one-click **cmd** version with the same honest pipeline (deps → Electron runtime check → EULA → build → SHA-256 checksums, failing loudly with the real exit code on any step)? Double-click **`build.cmd`** in the project root, or run it from a terminal:
+
+```bat
+build.cmd              :: Setup + Portable
+build.cmd installer    :: only the NSIS Setup exe
+build.cmd portable     :: only the Portable exe
+```
+
+`build.cmd` never publishes (`--publish never`) — it is the local counterpart of the CI release pipeline, it is pre-wired to the bundled Node in `tools\node` (falls back to a PATH Node), and it is safe to run repeatedly.
+
 ### Step 7 — Optional: code signing
 
 Unsigned exes are perfectly fine for a GitHub Release — Windows SmartScreen shows its "unknown publisher" notice until you buy an Authenticode certificate. If/when you have one, export it as `CSC_LINK` + `CSC_KEY_PASSWORD` environment variables and rebuild; the full procedure is in [`RELEASE.md`](RELEASE.md#4-code-signing-optional), §4.
