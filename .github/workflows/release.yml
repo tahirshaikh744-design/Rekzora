@@ -118,18 +118,27 @@ jobs:
             Write-Error "Refusing: expected Setup + Portable + checksums, found: $($files -join ', ')"
           }
           $tag = "${{ github.ref_name }}"
+          # Release title: the H1 heading of RELEASE-NOTES.md; falls back to "Rekzora <tag>".
+          $title = "Rekzora $tag"
+          if (Test-Path RELEASE-NOTES.md) {
+            # Read with explicit UTF-8: the notes H1 carries an emoji and an
+            # em-dash; a codepage-dependent reader would mojibake the title.
+            $h1 = @([IO.File]::ReadLines("$PWD/RELEASE-NOTES.md", [Text.UTF8Encoding]::new($false)))[0]
+            if ($h1 -match '^#\s+(.+)$') { $title = $Matches[1].Trim() }
+          }
+          Write-Host "Release title: $title"
           $existing = gh release view $tag --json id 2>$null
           if ($LASTEXITCODE -eq 0 -and $existing) {
             Write-Host "Release $tag exists — uploading with --clobber"
             gh release upload $tag @files --clobber
-            gh release edit $tag --title "Rekzora $tag" $(if (Test-Path RELEASE-NOTES.md) { @("--notes-file", "RELEASE-NOTES.md") })
+            gh release edit $tag --title "$title" $(if (Test-Path RELEASE-NOTES.md) { @("--notes-file", "RELEASE-NOTES.md") })
           } else {
             Write-Host "Creating release $tag"
             if (Test-Path RELEASE-NOTES.md) {
-              gh release create $tag @files --title "Rekzora $tag" --notes-file RELEASE-NOTES.md
+              gh release create $tag @files --title "$title" --notes-file RELEASE-NOTES.md
             } else {
               Write-Warning "RELEASE-NOTES.md is missing — the release will carry generated notes."
-              gh release create $tag @files --title "Rekzora $tag" --generate-notes
+              gh release create $tag @files --title "$title" --generate-notes
             }
           }
           if ($LASTEXITCODE -ne 0) { Write-Error "GitHub Release step failed." }
